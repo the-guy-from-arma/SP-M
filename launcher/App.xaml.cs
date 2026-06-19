@@ -39,7 +39,10 @@ namespace SeapowerMultiplayer.Launcher
                 File.WriteAllBytes(Path.Combine(target, "Sea Power.exe"), Array.Empty<byte>());
 
                 var progress = new Progress<string>(_ => { });
-                Installer.InstallAsync(target, progress).GetAwaiter().GetResult();
+                Installer.InstallAsync(
+                    target,
+                    progress,
+                    skipGameRunningCheck: true).GetAwaiter().GetResult();
 
                 var settings = new LauncherSettings
                 {

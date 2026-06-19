@@ -36,9 +36,13 @@ namespace SeapowerMultiplayer.Launcher.Services
                     !ContainsAscii(path, "com.seapower.fourplayer"));
         }
 
-        public static async Task InstallAsync(string gameDir, IProgress<string> progress)
+        public static async Task InstallAsync(
+            string gameDir,
+            IProgress<string> progress,
+            bool skipGameRunningCheck = false)
         {
-            EnsureGameClosed();
+            if (!skipGameRunningCheck)
+                EnsureGameClosed();
 
             // Step 1: Extract BepInEx
             progress.Report("Extracting BepInEx...");
@@ -56,9 +60,13 @@ namespace SeapowerMultiplayer.Launcher.Services
             await Task.CompletedTask;
         }
 
-        public static async Task RepairAsync(string gameDir, IProgress<string> progress)
+        public static async Task RepairAsync(
+            string gameDir,
+            IProgress<string> progress,
+            bool skipGameRunningCheck = false)
         {
-            EnsureGameClosed();
+            if (!skipGameRunningCheck)
+                EnsureGameClosed();
 
             // Re-stash proxy if needed
             progress.Report("Checking proxy configuration...");

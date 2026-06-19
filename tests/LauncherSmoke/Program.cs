@@ -19,7 +19,7 @@ try
         throw new InvalidOperationException("Conflict detector missed the legacy plugin.");
 
     var progress = new Progress<string>(_ => { });
-    await Installer.InstallAsync(testRoot, progress);
+    await Installer.InstallAsync(testRoot, progress, skipGameRunningCheck: true);
 
     Require("BepInEx core", Path.Combine(testRoot, "BepInEx", "core", "BepInEx.dll"));
     Require("stored winhttp proxy", Path.Combine(testRoot, "BepInEx", "proxy", "winhttp.dll"));
@@ -75,7 +75,7 @@ try
             throw new InvalidOperationException($"Config did not contain: {expected}");
     }
 
-    await Installer.RepairAsync(testRoot, progress);
+    await Installer.RepairAsync(testRoot, progress, skipGameRunningCheck: true);
     Require("repaired four-player plugin",
         Path.Combine(testRoot, "BepInEx", "plugins", "SeaPowerFourPlayer.dll"));
 

@@ -625,6 +625,8 @@ namespace SeapowerMultiplayer.Launcher
                 return;
 
             _lobbyRefreshInFlight = true;
+            var selectedLobbyId =
+                (LobbyList.SelectedItem as PublicLobby)?.SteamLobbyId;
             LobbyList.IsEnabled = false;
             LobbyEmptyState.Visibility = Visibility.Visible;
             TxtLobbyEmptyTitle.Text = "SCANNING PUBLIC OPERATIONS";
@@ -639,6 +641,10 @@ namespace SeapowerMultiplayer.Launcher
                 _publicLobbies.Clear();
                 foreach (var lobby in result.Lobbies.Where(x => x.PlayerCount < x.MaxPlayers))
                     _publicLobbies.Add(lobby);
+
+                if (!string.IsNullOrEmpty(selectedLobbyId))
+                    LobbyList.SelectedItem = _publicLobbies.FirstOrDefault(
+                        x => x.SteamLobbyId == selectedLobbyId);
 
                 LobbyEmptyState.Visibility = _publicLobbies.Count == 0
                     ? Visibility.Visible
@@ -694,7 +700,24 @@ namespace SeapowerMultiplayer.Launcher
 
         private async void BtnJoinPublicLobby_Click(object sender, RoutedEventArgs e)
         {
-            if (LobbyList.SelectedItem is not PublicLobby selected || !ValidInstall())
+            if (LobbyList.SelectedItem is not PublicLobby selected)
+                return;
+
+            await JoinPublicLobbyAsync(selected);
+        }
+
+        private async void BtnJoinLobbyRow_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button { CommandParameter: PublicLobby selected })
+                return;
+
+            LobbyList.SelectedItem = selected;
+            await JoinPublicLobbyAsync(selected);
+        }
+
+        private async Task JoinPublicLobbyAsync(PublicLobby selected)
+        {
+            if (_gameRunning || !ValidInstall())
                 return;
 
             RbSteam.IsChecked = true;

@@ -82,7 +82,7 @@ app.MapGet("/health", () => Results.Ok(new
 
 app.MapGet("/api/v1/release", (HttpRequest request) =>
 {
-    const string version = "0.6.3";
+    const string version = "0.6.4";
     const string pluginVersion = "0.1.6-alpha";
     var sha256 = Environment.GetEnvironmentVariable("LAUNCHER_SHA256") ?? "";
     return Results.Ok(new
@@ -93,7 +93,7 @@ app.MapGet("/api/v1/release", (HttpRequest request) =>
         packageUrl = "/download/package",
         sha256,
         releaseNotes =
-            "Public lobby visibility, legacy-plugin conflict detection, and a working one-click full launcher package download.",
+            "Direct lobby-row joining, live mission names, clearer host waiting status, and a one-click EXE download.",
     });
 }).RequireRateLimiting("public-read");
 

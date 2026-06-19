@@ -1,5 +1,15 @@
 # Changelog
 
+## Launcher v0.6.4 / Plugin v0.1.6-alpha
+
+- Added a visible **Join** button directly to every public lobby row.
+- Public lobby heartbeats now publish the selected mission filename instead of
+  permanently reporting `Waiting for mission`.
+- Mission changes trigger an immediate directory heartbeat and update Steam
+  lobby metadata.
+- The in-game overlay now labels protocol 403 as a compatibility version and
+  reports `Waiting for player` while a public host lobby is live.
+
 ## Launcher v0.6.3 / Plugin v0.1.6-alpha
 
 - The launcher now detects the active legacy two-player plugin that causes

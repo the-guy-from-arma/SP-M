@@ -1,6 +1,8 @@
 using System;
+using System.IO;
 using System.Net.Http;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -24,7 +26,9 @@ namespace SeapowerMultiplayer.Transport
         private static string _heartbeatToken = "";
         private static string _steamLobbyId = "";
         private static DateTime _nextHeartbeatUtc;
+        private static DateTime _nextScenarioCheckUtc;
         private static bool _requestInFlight;
+        private static string _lastScenario = "Waiting for mission";
         private static string _serviceRoot =
             "https://spdash-production.up.railway.app";
 
@@ -51,6 +55,7 @@ namespace SeapowerMultiplayer.Transport
 
         public static void RegisterPublicLobby(CSteamID lobbyId)
         {
+            _lastScenario = ResolveScenarioName();
             var registration = new LobbyRegistration
             {
                 SteamLobbyId = lobbyId.ToString(),
@@ -61,16 +66,33 @@ namespace SeapowerMultiplayer.Transport
                 MaxPlayers = FourPlayerLobby.MaxPlayers,
                 PvP = Plugin.Instance.CfgPvP.Value,
                 HostTeam = Math.Max(0, Math.Min(1, Plugin.Instance.CfgPreferredTeam.Value)),
-                Scenario = "Waiting for mission",
+                Scenario = _lastScenario,
                 Region = "Automatic",
                 PluginVersion = PluginInfo.PLUGIN_VERSION,
                 Protocol = ProtocolInfo.ProtocolVersion,
             };
+            SteamMatchmaking.SetLobbyData(lobbyId, "scenario", _lastScenario);
             _ = RegisterAsync(registration);
         }
 
         public static void Tick(CSteamID lobbyId)
         {
+            if (lobbyId == CSteamID.Nil)
+                return;
+
+            if (DateTime.UtcNow >= _nextScenarioCheckUtc)
+            {
+                _nextScenarioCheckUtc = DateTime.UtcNow.AddSeconds(2);
+                var scenario = ResolveScenarioName();
+                if (!string.Equals(scenario, _lastScenario, StringComparison.Ordinal))
+                {
+                    _lastScenario = scenario;
+                    SteamMatchmaking.SetLobbyData(lobbyId, "scenario", scenario);
+                    _nextHeartbeatUtc = DateTime.MinValue;
+                    Plugin.Log.LogInfo($"[Directory] Mission changed to '{scenario}'.");
+                }
+            }
+
             if (lobbyId == CSteamID.Nil || DateTime.UtcNow < _nextHeartbeatUtc)
                 return;
 
@@ -87,7 +109,7 @@ namespace SeapowerMultiplayer.Transport
             var heartbeat = new LobbyHeartbeat
             {
                 PlayerCount = Math.Max(1, SteamMatchmaking.GetNumLobbyMembers(lobbyId)),
-                Scenario = "Waiting for mission",
+                Scenario = _lastScenario,
             };
             _ = HeartbeatAsync(lobbyId.ToString(), token, heartbeat);
         }
@@ -103,6 +125,8 @@ namespace SeapowerMultiplayer.Transport
                 _steamLobbyId = "";
                 _heartbeatToken = "";
                 _requestInFlight = false;
+                _lastScenario = "Waiting for mission";
+                _nextScenarioCheckUtc = DateTime.MinValue;
             }
 
             if (!string.IsNullOrEmpty(lobbyId) && !string.IsNullOrEmpty(token))
@@ -248,6 +272,43 @@ namespace SeapowerMultiplayer.Transport
         private static string BuildUrl(string path)
         {
             return _serviceRoot + path;
+        }
+
+        private static string ResolveScenarioName()
+        {
+            try
+            {
+                var missionPath = SeaPower.Globals.currentMissionFilePath;
+                if (string.IsNullOrWhiteSpace(missionPath))
+                    return "Waiting for mission";
+
+                if (Path.GetExtension(missionPath).Equals(
+                        ".sav",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    File.Exists(missionPath))
+                {
+                    var saveContent = File.ReadAllText(missionPath);
+                    var baseFile = Regex.Match(
+                        saveContent,
+                        @"(?im)^\s*BaseFile\s*=\s*(.+?)\s*$");
+                    if (baseFile.Success)
+                        missionPath = baseFile.Groups[1].Value.Trim();
+                }
+
+                var name = Path.GetFileNameWithoutExtension(missionPath);
+                if (string.IsNullOrWhiteSpace(name))
+                    return "Mission loaded";
+
+                name = Regex.Replace(name, @"[_-]+", " ");
+                name = Regex.Replace(name, @"\s+", " ").Trim();
+                return name.Length <= 80 ? name : name.Substring(0, 80);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning(
+                    $"[Directory] Could not read current mission name: {ex.Message}");
+                return "Mission loaded";
+            }
         }
 
         private sealed class LobbyRegistration

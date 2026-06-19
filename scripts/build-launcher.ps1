@@ -24,7 +24,7 @@ $launcherProject = Join-Path $root "launcher\SeaPowerFourPlayer.Launcher.csproj"
 $backendProject = Join-Path $root "backend\SeaPowerLobbyService.csproj"
 $publishDir = Join-Path $root "launcher\bin\$Configuration\net8.0-windows\win-x64\publish"
 $distRoot = [System.IO.Path]::GetFullPath((Join-Path $root "dist"))
-$packageName = "SeaPowerFourPlayer-Launcher-v0.6.3"
+$packageName = "SeaPowerFourPlayer-Launcher-v0.6.4"
 $packageDir = [System.IO.Path]::GetFullPath((Join-Path $distRoot $packageName))
 $zipPath = [System.IO.Path]::GetFullPath((Join-Path $distRoot "$packageName.zip"))
 
@@ -69,10 +69,10 @@ Copy-Item -LiteralPath (Join-Path $root "THIRD_PARTY_NOTICES.md") -Destination $
 
 $hash = (Get-FileHash -LiteralPath $packagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifest = [ordered]@{
-    version = "0.6.3"
+    version = "0.6.4"
     downloadUrl = "SeaPowerFourPlayerLauncher.exe"
     sha256 = $hash
-    releaseNotes = "Shows public lobbies reliably, detects and repairs the conflicting old multiplayer plugin, and ships as a working one-click website package."
+    releaseNotes = "Adds a JOIN button to every lobby row, publishes the selected mission name, and clarifies that protocol v403 is a compatibility version rather than an error."
 }
 $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $packageDir "latest.json") -Encoding UTF8
 

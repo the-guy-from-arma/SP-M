@@ -13,9 +13,9 @@
     <AssemblyName>SeaPowerFourPlayerLauncher</AssemblyName>
     <RootNamespace>SeapowerMultiplayer.Launcher</RootNamespace>
     <ApplicationIcon>SP4P.ico</ApplicationIcon>
-    <Version>0.6.3</Version>
-    <AssemblyVersion>0.6.3.0</AssemblyVersion>
-    <FileVersion>0.6.3.0</FileVersion>
+    <Version>0.6.4</Version>
+    <AssemblyVersion>0.6.4.0</AssemblyVersion>
+    <FileVersion>0.6.4.0</FileVersion>
     <SatelliteResourceLanguages>en-US</SatelliteResourceLanguages>
     <Product>Sea Power Four Player Launcher</Product>
     <Company>Thunder Buddies Studios</Company>

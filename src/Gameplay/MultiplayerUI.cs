@@ -613,7 +613,9 @@ namespace SeapowerMultiplayer
                     ? "STEAM (HOST LOBBY)"
                     : "STEAM (CLIENT LOBBY)";
                 statusCol = new Color(1f, 1f, 0.3f);
-                statusStr = "In Lobby";
+                statusStr = Plugin.Instance.CfgIsHost.Value
+                    ? "Lobby Live"
+                    : "Joining Host";
             }
             else
             {
@@ -638,6 +640,10 @@ namespace SeapowerMultiplayer
             else if (inLobby)
             {
                 GUILayout.Label($"Lobby: {SteamLobbyManager.MemberCount}/4 players", _labelStyle);
+                if (Plugin.Instance.CfgIsHost.Value)
+                    GUILayout.Label(
+                        "Public lobby is live. Waiting for another player.",
+                        _dimLabelStyle);
             }
 
             GUILayout.Space(4);
@@ -898,7 +904,14 @@ namespace SeapowerMultiplayer
             DrawSectionTitle("≡", "NET v2");
 
             var nm = NetworkManager.Instance;
-            GUILayout.Label($"  Protocol {Net2.ProtocolInfo.ProtocolVersion}  ·  Handshake: {nm.Handshake}", _labelStyle);
+            string handshake = nm.Handshake.ToString();
+            if (!nm.IsConnected && SteamLobbyManager.InLobby)
+                handshake = Plugin.Instance.CfgIsHost.Value
+                    ? "Waiting for player"
+                    : "Connecting to host";
+            GUILayout.Label(
+                $"  Protocol v{Net2.ProtocolInfo.ProtocolVersion} (compatibility)  ·  {handshake}",
+                _labelStyle);
 
             if (!nm.IsConnected) return;
 

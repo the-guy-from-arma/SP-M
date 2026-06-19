@@ -658,9 +658,10 @@
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="*"/>
-                                            <ColumnDefinition Width="95"/>
-                                            <ColumnDefinition Width="85"/>
-                                            <ColumnDefinition Width="105"/>
+                                            <ColumnDefinition Width="70"/>
+                                            <ColumnDefinition Width="65"/>
+                                            <ColumnDefinition Width="90"/>
+                                            <ColumnDefinition Width="82"/>
                                         </Grid.ColumnDefinitions>
                                         <StackPanel>
                                             <TextBlock Text="{Binding LobbyName}"
@@ -691,6 +692,14 @@
                                                    Foreground="#8DA6B1"
                                                    VerticalAlignment="Center"
                                                    HorizontalAlignment="Right"/>
+                                        <Button Grid.Column="4"
+                                                Style="{StaticResource OutlineButton}"
+                                                Content="JOIN"
+                                                Padding="14,8"
+                                                Margin="12,0,0,0"
+                                                VerticalAlignment="Center"
+                                                CommandParameter="{Binding}"
+                                                Click="BtnJoinLobbyRow_Click"/>
                                     </Grid>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
