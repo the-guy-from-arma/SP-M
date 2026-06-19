@@ -1,5 +1,39 @@
 # Changelog
 
+## Launcher v0.6.3 / Plugin v0.1.6-alpha
+
+- The launcher now detects the active legacy two-player plugin that causes
+  BepInEx to reject the four-player plugin, blocks launch, and directs the user
+  to one-click Repair.
+- The public lobby browser refreshes automatically while it is open and remains
+  visible while a launcher-created public Steam operation starts.
+- The website's primary download now serves the complete launcher package with
+  the installer EXE included.
+- Release publishing copies the full package into the web service so the
+  download button no longer depends on an unset Railway asset URL.
+
+## Launcher v0.6.2 / Plugin v0.1.6-alpha
+
+- Bumped the multiplayer protocol to 403 so old launcher builds cannot appear
+  compatible with the corrected Steam join flow.
+- The host now checks the exact plugin version during Hello/Welcome and returns
+  a clear update-and-repair message for mixed installations.
+- Centralized the launcher's protocol metadata so lobby discovery and telemetry
+  cannot accidentally keep querying an older protocol.
+- Updated the Railway release metadata and public download page for v0.6.2.
+
+## Launcher v0.6.1 / Plugin v0.1.5-alpha
+
+- Fixed launcher-selected Steam lobby joins being queued after Steam callbacks
+  had already initialized and therefore never executing.
+- Added a short-lived launcher-to-game command file so Steam process restarts
+  cannot discard public-host or join-lobby instructions.
+- Public lobby creation now opens the Steam invite overlay after the lobby is
+  successfully created.
+- Repair now finds legacy `com.seapowermultiplayer.plugin` DLLs recursively,
+  even when renamed or placed in plugin subfolders, quarantines them, and
+  verifies that only the four-player plugin remains active.
+
 ## Launcher v0.6.0 / Plugin v0.1.4-alpha
 
 - Added an Aegis Combat System-inspired startup sequence with phased-array sweep,

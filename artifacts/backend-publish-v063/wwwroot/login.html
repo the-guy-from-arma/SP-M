@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SP4P Command Access</title>
+  <link rel="stylesheet" href="/site.css">
+</head>
+<body class="login-shell">
+  <main class="login-panel">
+    <div class="eyebrow">AEGIS NETWORK // RESTRICTED</div>
+    <h1>Creator command access</h1>
+    <p>Traffic, public operations and service controls.</p>
+    <form method="post" action="/admin/login">
+      <label for="password">Command password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button type="submit">AUTHENTICATE</button>
+    </form>
+    <div id="error" class="error">Authentication failed.</div>
+  </main>
+  <script>
+    if (new URLSearchParams(location.search).has("error")) {
+      document.getElementById("error").style.display = "block";
+    }
+  </script>
+</body>
+</html>

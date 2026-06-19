@@ -18,10 +18,13 @@ One Railway service provides:
 
    - `DATABASE_URL=${{Postgres.DATABASE_URL}}`
    - `ADMIN_PASSWORD=<a long unique password>`
-   - `LAUNCHER_DOWNLOAD_URL=<GitHub Release EXE asset URL>`
-   - `PACKAGE_DOWNLOAD_URL=<GitHub Release ZIP asset URL>`
-   - `LAUNCHER_VERSION=0.6.0`
    - `LAUNCHER_SHA256=<the packaged EXE SHA-256>`
+
+   `LAUNCHER_DOWNLOAD_URL` and `PACKAGE_DOWNLOAD_URL` are optional overrides.
+   The release build copies the complete launcher ZIP into
+   `wwwroot/downloads`, so the public download button works without them.
+   Release and plugin versions are compiled into the service to prevent stale
+   Railway environment values from advertising an older build.
 
 6. Generate a public Railway domain.
 7. Open `/admin` on that domain and sign in.

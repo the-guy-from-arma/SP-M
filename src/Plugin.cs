@@ -120,13 +120,14 @@ namespace SeapowerMultiplayer
             {
                 var args = System.Environment.GetCommandLineArgs();
                 bool publicHost = false;
+                bool openInvite = false;
+                ulong selectedLobbyId = 0;
                 for (int i = 0; i < args.Length - 1; i++)
                 {
                     if (args[i] == "+connect_lobby" && ulong.TryParse(args[i + 1], out ulong lobbyId))
                     {
                         Log.LogInfo($"[Steam] Launch arg +connect_lobby {lobbyId}");
-                        SteamLobbyManager.JoinLobbyFromLaunchArg(lobbyId);
-                        break;
+                        selectedLobbyId = lobbyId;
                     }
                     if (args[i] == "+sp4p_lobby_name")
                         CfgPublicLobbyName.Value = args[i + 1];
@@ -134,11 +135,30 @@ namespace SeapowerMultiplayer
                 for (int i = 0; i < args.Length; i++)
                     publicHost |= args[i] == "+sp4p_public_host";
 
+                var launcherCommand = LauncherGameCommand.Consume();
+                if (launcherCommand != null)
+                {
+                    Log.LogInfo($"[LauncherCommand] Consumed action '{launcherCommand.Action}'.");
+                    if (launcherCommand.Action == "join" &&
+                        ulong.TryParse(launcherCommand.LobbyId, out var commandLobbyId))
+                        selectedLobbyId = commandLobbyId;
+                    else if (launcherCommand.Action == "create-public")
+                    {
+                        publicHost = true;
+                        openInvite = launcherCommand.OpenInviteOverlay;
+                        if (!string.IsNullOrWhiteSpace(launcherCommand.LobbyName))
+                            CfgPublicLobbyName.Value = launcherCommand.LobbyName;
+                    }
+                }
+
+                if (selectedLobbyId != 0)
+                    SteamLobbyManager.JoinLobbyFromLaunchArg(selectedLobbyId);
+
                 if (publicHost)
                 {
                     CfgIsHost.Value = true;
                     Log.LogInfo("[Steam] Launcher requested automatic public lobby creation.");
-                    SteamLobbyManager.RequestAutoCreatePublicLobby();
+                    SteamLobbyManager.RequestAutoCreatePublicLobby(openInvite);
                 }
             }
 

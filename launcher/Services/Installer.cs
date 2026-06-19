@@ -2,7 +2,9 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace SeapowerMultiplayer.Launcher.Services
@@ -13,6 +15,26 @@ namespace SeapowerMultiplayer.Launcher.Services
         private const string PluginsDir = "BepInEx\\plugins";
         private const string LogFile = "BepInEx\\LogOutput.log";
         private const int InitTimeoutMs = 90_000;
+
+        public static bool HasActiveConflictingPlugin(string gameDir)
+        {
+            var pluginsPath = Path.Combine(gameDir, PluginsDir);
+            if (!Directory.Exists(pluginsPath))
+                return false;
+
+            var backupDir = Path.Combine(pluginsPath, "SeaPowerFourPlayer-backup");
+            var backupRoot = Path.GetFullPath(backupDir) + Path.DirectorySeparatorChar;
+            return Directory.EnumerateFiles(
+                    pluginsPath,
+                    "*.dll",
+                    SearchOption.AllDirectories)
+                .Where(path => !Path.GetFullPath(path).StartsWith(
+                    backupRoot,
+                    StringComparison.OrdinalIgnoreCase))
+                .Any(path =>
+                    ContainsAscii(path, "com.seapowermultiplayer.plugin") &&
+                    !ContainsAscii(path, "com.seapower.fourplayer"));
+        }
 
         public static async Task InstallAsync(string gameDir, IProgress<string> progress)
         {
@@ -178,7 +200,7 @@ namespace SeapowerMultiplayer.Launcher.Services
             var pluginsPath = Path.Combine(gameDir, PluginsDir);
             Directory.CreateDirectory(pluginsPath);
 
-            BackupConflictingPlugin(pluginsPath, "SeapowerMultiplayer.dll");
+            BackupAllConflictingPlugins(pluginsPath);
             BackupConflictingPlugin(pluginsPath, "SeaPowerFourPlayer.dll");
 
             ExtractEmbeddedResource("SeaPowerFourPlayer.dll",
@@ -186,8 +208,34 @@ namespace SeapowerMultiplayer.Launcher.Services
             ExtractEmbeddedResource("LiteNetLib.dll",
                 Path.Combine(pluginsPath, "LiteNetLib.dll"));
 
+            VerifyInstalledPlugins(pluginsPath);
+
             var chainloaderCache = Path.Combine(gameDir, "BepInEx", "cache", "chainloader_typeloader.dat");
             TryDelete(chainloaderCache);
+        }
+
+        private static void BackupAllConflictingPlugins(string pluginsPath)
+        {
+            var backupDir = Path.Combine(pluginsPath, "SeaPowerFourPlayer-backup");
+            Directory.CreateDirectory(backupDir);
+
+            foreach (var file in Directory.EnumerateFiles(
+                         pluginsPath,
+                         "*.dll",
+                         SearchOption.AllDirectories))
+            {
+                var fullPath = Path.GetFullPath(file);
+                if (fullPath.StartsWith(
+                        Path.GetFullPath(backupDir) + Path.DirectorySeparatorChar,
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!ContainsAscii(file, "com.seapowermultiplayer.plugin") ||
+                    ContainsAscii(file, "com.seapower.fourplayer"))
+                    continue;
+
+                BackupPluginFile(file, backupDir);
+            }
         }
 
         private static void BackupConflictingPlugin(string pluginsPath, string fileName)
@@ -198,9 +246,54 @@ namespace SeapowerMultiplayer.Launcher.Services
 
             var backupDir = Path.Combine(pluginsPath, "SeaPowerFourPlayer-backup");
             Directory.CreateDirectory(backupDir);
+            BackupPluginFile(source, backupDir);
+        }
+
+        private static void BackupPluginFile(string source, string backupDir)
+        {
             var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmssfff");
+            var fileName = Path.GetFileName(source);
             var destination = Path.Combine(backupDir, $"{fileName}.{stamp}.disabled");
             File.Move(source, destination);
+        }
+
+        private static void VerifyInstalledPlugins(string pluginsPath)
+        {
+            var fourPlayerPath = Path.Combine(pluginsPath, "SeaPowerFourPlayer.dll");
+            if (!File.Exists(fourPlayerPath) ||
+                !ContainsAscii(fourPlayerPath, "com.seapower.fourplayer"))
+                throw new InvalidDataException(
+                    "The four-player plugin failed installation verification.");
+
+            if (HasActiveConflictingPlugin(
+                    Directory.GetParent(
+                        Directory.GetParent(pluginsPath)!.FullName)!.FullName))
+                throw new InvalidDataException(
+                    "A conflicting two-player multiplayer plugin remains active.");
+        }
+
+        private static bool ContainsAscii(string path, string value)
+        {
+            try
+            {
+                var bytes = File.ReadAllBytes(path);
+                var needle = Encoding.ASCII.GetBytes(value);
+                for (int i = 0; i <= bytes.Length - needle.Length; i++)
+                {
+                    int j = 0;
+                    for (; j < needle.Length; j++)
+                    {
+                        if (bytes[i + j] != needle[j])
+                            break;
+                    }
+                    if (j == needle.Length)
+                        return true;
+                }
+            }
+            catch
+            {
+            }
+            return false;
         }
 
         private static void EnsureGameClosed()

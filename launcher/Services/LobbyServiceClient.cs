@@ -69,7 +69,7 @@ namespace SeapowerMultiplayer.Launcher.Services
         {
             var url = BuildUrl(
                 serviceUrl,
-                $"/api/v1/lobbies?pluginVersion={Uri.EscapeDataString(LauncherVersions.PluginNumericVersion)}&protocol=402");
+                $"/api/v1/lobbies?pluginVersion={Uri.EscapeDataString(LauncherVersions.PluginNumericVersion)}&protocol={LauncherVersions.ProtocolVersion}");
             using var response = await Http.GetAsync(url);
             response.EnsureSuccessStatusCode();
             return await response.Content.ReadFromJsonAsync<LobbyDirectoryResult>(JsonOptions)
@@ -105,7 +105,7 @@ namespace SeapowerMultiplayer.Launcher.Services
                         @event = eventName,
                         lobbyId,
                         version = LauncherVersions.LauncherVersion,
-                        protocol = 402,
+                        protocol = LauncherVersions.ProtocolVersion,
                         detail,
                     });
             }

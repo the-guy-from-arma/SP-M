@@ -82,16 +82,18 @@ app.MapGet("/health", () => Results.Ok(new
 
 app.MapGet("/api/v1/release", (HttpRequest request) =>
 {
-    var version = Environment.GetEnvironmentVariable("LAUNCHER_VERSION") ?? "0.6.0";
+    const string version = "0.6.3";
+    const string pluginVersion = "0.1.6-alpha";
     var sha256 = Environment.GetEnvironmentVariable("LAUNCHER_SHA256") ?? "";
     return Results.Ok(new
     {
         version,
+        pluginVersion,
         downloadUrl = "/download/launcher",
         packageUrl = "/download/package",
         sha256,
         releaseNotes =
-            "Aegis-style launcher, public Steam lobby browser, four-track music player, and automatic mod installation.",
+            "Public lobby visibility, legacy-plugin conflict detection, and a working one-click full launcher package download.",
     });
 }).RequireRateLimiting("public-read");
 
@@ -565,7 +567,7 @@ static IResult DownloadResult(
             enableRangeProcessing: true);
 
     return Results.Problem(
-        "The download asset has not been configured. Set LAUNCHER_DOWNLOAD_URL on Railway.",
+        "The full launcher package has not been published with this deployment.",
         statusCode: StatusCodes.Status503ServiceUnavailable);
 }
 

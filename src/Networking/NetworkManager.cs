@@ -622,11 +622,11 @@ namespace SeapowerMultiplayer
                 || peer.Handshake != HandshakeState.AwaitingHello)
                 return;
 
-            string? refusal = null;
-            if (hello.ProtocolVersion != ProtocolInfo.ProtocolVersion)
-                refusal = $"Protocol mismatch: host {ProtocolInfo.ProtocolVersion}, client {hello.ProtocolVersion}.";
-            else if (hello.IsPvP != Plugin.Instance.CfgPvP.Value)
-                refusal = "PvP/co-op mode mismatch.";
+            string? refusal = HandshakeCompatibility.GetRefusalReason(
+                hello.ProtocolVersion,
+                hello.PluginVersion,
+                hello.IsPvP,
+                Plugin.Instance.CfgPvP.Value);
 
             LobbySlot? slot = null;
             if (refusal == null)

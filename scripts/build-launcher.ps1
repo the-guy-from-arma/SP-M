@@ -24,7 +24,7 @@ $launcherProject = Join-Path $root "launcher\SeaPowerFourPlayer.Launcher.csproj"
 $backendProject = Join-Path $root "backend\SeaPowerLobbyService.csproj"
 $publishDir = Join-Path $root "launcher\bin\$Configuration\net8.0-windows\win-x64\publish"
 $distRoot = [System.IO.Path]::GetFullPath((Join-Path $root "dist"))
-$packageName = "SeaPowerFourPlayer-Launcher-v0.6.0"
+$packageName = "SeaPowerFourPlayer-Launcher-v0.6.3"
 $packageDir = [System.IO.Path]::GetFullPath((Join-Path $distRoot $packageName))
 $zipPath = [System.IO.Path]::GetFullPath((Join-Path $distRoot "$packageName.zip"))
 
@@ -69,19 +69,25 @@ Copy-Item -LiteralPath (Join-Path $root "THIRD_PARTY_NOTICES.md") -Destination $
 
 $hash = (Get-FileHash -LiteralPath $packagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
 $manifest = [ordered]@{
-    version = "0.6.0"
+    version = "0.6.3"
     downloadUrl = "SeaPowerFourPlayerLauncher.exe"
     sha256 = $hash
-    releaseNotes = "Aegis-style boot sequence, Railway public lobby browser, automatic Steam create/join flow, sharper UI motion, recommended settings, and reliable trailer looping."
+    releaseNotes = "Shows public lobbies reliably, detects and repairs the conflicting old multiplayer plugin, and ships as a working one-click website package."
 }
 $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $packageDir "latest.json") -Encoding UTF8
 
 Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $zipPath -CompressionLevel Optimal
+
+$webDownloadsDir = Join-Path $root "backend\wwwroot\downloads"
+New-Item -ItemType Directory -Path $webDownloadsDir -Force | Out-Null
+Copy-Item -LiteralPath $zipPath `
+    -Destination (Join-Path $webDownloadsDir "SeaPowerFourPlayer-Launcher.zip") `
+    -Force
 
 Write-Host ""
 Write-Host "Launcher EXE: $packagedExe"
 Write-Host "Friend package: $zipPath"
 Write-Host "SHA-256: $hash"
 Write-Host ""
-Write-Host "For web updates, upload SeaPowerFourPlayerLauncher.exe and latest.json together under:"
-Write-Host "https://spdash-production.up.railway.app/"
+Write-Host "Website package copied to:"
+Write-Host (Join-Path $webDownloadsDir "SeaPowerFourPlayer-Launcher.zip")

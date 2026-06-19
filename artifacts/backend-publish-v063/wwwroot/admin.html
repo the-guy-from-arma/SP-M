@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SP4P Creator Command</title>
+  <link rel="stylesheet" href="/site.css">
+</head>
+<body>
+  <header>
+    <div>
+      <div class="eyebrow">SEA POWER FOUR PLAYER</div>
+      <h1>Creator Command</h1>
+    </div>
+    <div class="header-actions">
+      <span id="clock"></span>
+      <button class="ghost" onclick="refreshAll()">REFRESH</button>
+      <form method="post" action="/admin/logout"><button class="ghost">SIGN OUT</button></form>
+    </div>
+  </header>
+
+  <nav>
+    <button class="nav active" data-view="overview">OPERATIONS</button>
+    <button class="nav" data-view="lobbies">PUBLIC LOBBIES</button>
+    <button class="nav" data-view="traffic">TRAFFIC</button>
+    <button class="nav" data-view="controls">SERVICE CONTROL</button>
+  </nav>
+
+  <main>
+    <section id="overview" class="view active">
+      <div class="grid stats">
+        <article><span>ACTIVE LOBBIES</span><strong id="activeLobbies">—</strong></article>
+        <article><span>PLAYERS ONLINE</span><strong id="playersOnline">—</strong></article>
+        <article><span>EVENTS / 24H</span><strong id="events24h">—</strong></article>
+        <article><span>JOIN SUCCESS</span><strong id="joinSuccess">—</strong></article>
+      </div>
+      <div class="panel">
+        <div class="panel-title">NETWORK POSTURE</div>
+        <div class="status-line"><i class="online"></i><span>Lobby directory operational</span></div>
+        <div class="status-line"><i></i><span id="maintenanceSummary">Public matchmaking enabled</span></div>
+        <div class="status-line"><i></i><span id="versionSummary">No forced version gate</span></div>
+      </div>
+    </section>
+
+    <section id="lobbies" class="view">
+      <div class="panel">
+        <div class="panel-title">LIVE PUBLIC OPERATIONS</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>OPERATION</th><th>HOST</th><th>CREW</th><th>MODE</th><th>VERSION</th><th>HEARTBEAT</th><th></th></tr></thead>
+            <tbody id="lobbyRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="traffic" class="view">
+      <div class="panel">
+        <div class="panel-title">RECENT TRAFFIC</div>
+        <div id="trafficRows" class="event-list"></div>
+      </div>
+    </section>
+
+    <section id="controls" class="view">
+      <div class="panel form-panel">
+        <div class="panel-title">PUBLIC NETWORK CONTROL</div>
+        <label>Launcher announcement</label>
+        <input id="announcement" maxlength="180">
+        <div class="two">
+          <label><input id="publicEnabled" type="checkbox"> Public lobbies enabled</label>
+          <label><input id="maintenance" type="checkbox"> Maintenance mode</label>
+        </div>
+        <div class="two">
+          <div><label>Required launcher version</label><input id="launcherVersion" placeholder="optional"></div>
+          <div><label>Required plugin version</label><input id="pluginVersion" placeholder="optional"></div>
+        </div>
+        <button onclick="saveConfig()">APPLY SERVICE CONFIGURATION</button>
+        <span id="saveState"></span>
+      </div>
+    </section>
+  </main>
+
+  <script src="/admin.js"></script>
+</body>
+</html>

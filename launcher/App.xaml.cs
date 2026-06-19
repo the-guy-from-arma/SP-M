@@ -16,6 +16,8 @@ namespace SeapowerMultiplayer.Launcher
 
             if (TryRunInstallSmoke(e.Args))
                 return;
+            if (TryRunRepairInstall(e.Args))
+                return;
 
             LauncherDiagnostics.Trace("Constructing MainWindow.");
             MainWindow = new MainWindow();
@@ -115,6 +117,39 @@ namespace SeapowerMultiplayer.Launcher
             {
                 Directory.CreateDirectory(target);
                 File.WriteAllText(Path.Combine(target, "launcher-smoke-failure.txt"), ex.ToString());
+                Environment.ExitCode = 1;
+            }
+
+            Shutdown(Environment.ExitCode);
+            return true;
+        }
+
+        private bool TryRunRepairInstall(string[] args)
+        {
+            if (args.Length < 2 ||
+                !args[0].Equals("--repair-install", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var target = Path.GetFullPath(args[1]);
+            try
+            {
+                if (!GameDetector.IsValidGameDir(target))
+                    throw new DirectoryNotFoundException(
+                        $"Sea Power installation was not found: {target}");
+
+                var progress = new Progress<string>(_ => { });
+                Installer.RepairAsync(target, progress).GetAwaiter().GetResult();
+                Environment.ExitCode = 0;
+            }
+            catch (Exception ex)
+            {
+                var reportDir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "SeaPowerFourPlayer");
+                Directory.CreateDirectory(reportDir);
+                File.WriteAllText(
+                    Path.Combine(reportDir, "repair-failure.txt"),
+                    ex.ToString());
                 Environment.ExitCode = 1;
             }
 

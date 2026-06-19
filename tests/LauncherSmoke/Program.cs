@@ -5,6 +5,19 @@ Directory.CreateDirectory(testRoot);
 
 try
 {
+    var legacyPluginPath = Path.Combine(
+        testRoot,
+        "BepInEx",
+        "plugins",
+        "nested",
+        "renamed-legacy-network.dll");
+    Directory.CreateDirectory(Path.GetDirectoryName(legacyPluginPath)!);
+    File.WriteAllText(
+        legacyPluginPath,
+        "fixture com.seapowermultiplayer.plugin fixture");
+    if (!Installer.HasActiveConflictingPlugin(testRoot))
+        throw new InvalidOperationException("Conflict detector missed the legacy plugin.");
+
     var progress = new Progress<string>(_ => { });
     await Installer.InstallAsync(testRoot, progress);
 
@@ -13,6 +26,18 @@ try
     Require("stored Doorstop config", Path.Combine(testRoot, "BepInEx", "proxy", "doorstop_config.ini"));
     Require("four-player plugin", Path.Combine(testRoot, "BepInEx", "plugins", "SeaPowerFourPlayer.dll"));
     Require("LiteNetLib", Path.Combine(testRoot, "BepInEx", "plugins", "LiteNetLib.dll"));
+    if (File.Exists(legacyPluginPath))
+        throw new InvalidOperationException("Installer left a renamed legacy plugin active.");
+    if (Installer.HasActiveConflictingPlugin(testRoot))
+        throw new InvalidOperationException("Installer left an active conflicting plugin.");
+    var backupDir = Path.Combine(
+        testRoot,
+        "BepInEx",
+        "plugins",
+        "SeaPowerFourPlayer-backup");
+    if (!Directory.Exists(backupDir) ||
+        !Directory.EnumerateFiles(backupDir, "*.disabled").Any())
+        throw new InvalidOperationException("Installer did not quarantine the legacy plugin.");
 
     if (File.Exists(Path.Combine(testRoot, "winhttp.dll")) ||
         File.Exists(Path.Combine(testRoot, "doorstop_config.ini")))

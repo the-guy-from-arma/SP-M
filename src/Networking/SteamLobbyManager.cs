@@ -25,6 +25,8 @@ namespace SeapowerMultiplayer.Transport
         private static bool _autoCreatePublicLobby;
         private static float _autoCreateAfter;
         private static bool _creatingPublicLobby;
+        private static bool _initialized;
+        private static bool _openInviteAfterCreate;
 
         // ── Callbacks ─────────────────────────────────────────────────────────
         private static Callback<LobbyCreated_t>? _lobbyCreatedCb;
@@ -42,6 +44,7 @@ namespace SeapowerMultiplayer.Transport
             _lobbyEnteredCb = Callback<LobbyEnter_t>.Create(OnLobbyEntered);
             _lobbyJoinRequestedCb = Callback<GameLobbyJoinRequested_t>.Create(OnLobbyJoinRequested);
             _lobbyChatUpdateCb = Callback<LobbyChatUpdate_t>.Create(OnLobbyChatUpdate);
+            _initialized = true;
 
             // If we have a pending join from launch args, do it now
             if (_pendingLobbyJoin != 0)
@@ -57,14 +60,23 @@ namespace SeapowerMultiplayer.Transport
         /// </summary>
         public static void JoinLobbyFromLaunchArg(ulong lobbyId)
         {
+            if (_initialized)
+            {
+                Log.LogInfo($"[SteamLobby] Joining launcher-selected lobby {lobbyId}");
+                LobbyDirectoryClient.Track("join_attempted", lobbyId.ToString());
+                JoinLobby(new CSteamID(lobbyId));
+                return;
+            }
+
             Log.LogInfo($"[SteamLobby] Deferred join for lobby {lobbyId}");
             _pendingLobbyJoin = lobbyId;
         }
 
-        public static void RequestAutoCreatePublicLobby()
+        public static void RequestAutoCreatePublicLobby(bool openInviteOverlay = false)
         {
             _autoCreatePublicLobby = true;
             _autoCreateAfter = Time.realtimeSinceStartup + 2f;
+            _openInviteAfterCreate = openInviteOverlay;
         }
 
         public static void Tick()
@@ -170,7 +182,15 @@ namespace SeapowerMultiplayer.Transport
             // Start transport as host
             NetworkManager.Instance.StartTransport(asHost: true);
             if (_creatingPublicLobby)
+            {
                 LobbyDirectoryClient.RegisterPublicLobby(LobbyId);
+                if (_openInviteAfterCreate)
+                {
+                    _openInviteAfterCreate = false;
+                    Log.LogInfo("[SteamLobby] Opening Steam invite overlay.");
+                    SteamFriends.ActivateGameOverlayInviteDialog(LobbyId);
+                }
+            }
         }
 
         private static void OnLobbyEntered(LobbyEnter_t result)

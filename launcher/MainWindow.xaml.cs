@@ -54,14 +54,17 @@ namespace SeapowerMultiplayer.Launcher
         private readonly MediaPlayer _musicPlayer = new();
         private readonly DispatcherTimer _videoLoopTimer;
         private readonly DispatcherTimer _bootTimer;
+        private readonly DispatcherTimer _lobbyRefreshTimer;
         private readonly ObservableCollection<PublicLobby> _publicLobbies = new();
         private bool _gameRunning;
+        private bool _activePluginConflict;
         private UpdateInfo? _pendingUpdate;
         private string _lastIP = "127.0.0.1";
         private bool _trackTransitioning;
         private bool _configLoaded;
         private bool _settingsDrawerOpen;
         private bool _lobbyBrowserOpen;
+        private bool _lobbyRefreshInFlight;
         private int _bootStep;
 
         private static readonly string[] BootLines =
@@ -94,6 +97,16 @@ namespace SeapowerMultiplayer.Launcher
                 Interval = TimeSpan.FromMilliseconds(330),
             };
             _bootTimer.Tick += BootTimer_Tick;
+
+            _lobbyRefreshTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(4),
+            };
+            _lobbyRefreshTimer.Tick += async (_, _) =>
+            {
+                if (_lobbyBrowserOpen)
+                    await RefreshPublicLobbiesAsync();
+            };
 
             _musicPlayer.MediaOpened += (_, _) => _trackTransitioning = false;
             _musicPlayer.MediaEnded += (_, _) =>
@@ -182,6 +195,7 @@ namespace SeapowerMultiplayer.Launcher
             LauncherDiagnostics.Trace("MainWindow Closed; shutting down media and application.");
             _videoLoopTimer.Stop();
             _bootTimer.Stop();
+            _lobbyRefreshTimer.Stop();
             BattleVideo.Stop();
             BattleVideo.Close();
             _musicPlayer.Stop();
@@ -549,6 +563,7 @@ namespace SeapowerMultiplayer.Launcher
                 CloseSettingsDrawer();
 
             _lobbyBrowserOpen = true;
+            _lobbyRefreshTimer.Start();
             LobbyScrim.Visibility = Visibility.Visible;
             LobbyBrowser.Visibility = Visibility.Visible;
             TxtPublicLobbyName.Text = _config.Settings.PublicLobbyName;
@@ -581,6 +596,7 @@ namespace SeapowerMultiplayer.Launcher
                 return;
 
             _lobbyBrowserOpen = false;
+            _lobbyRefreshTimer.Stop();
             var ease = new CubicEase { EasingMode = EasingMode.EaseIn };
             var fade = new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(150))
             {
@@ -605,6 +621,10 @@ namespace SeapowerMultiplayer.Launcher
 
         private async Task RefreshPublicLobbiesAsync()
         {
+            if (_lobbyRefreshInFlight)
+                return;
+
+            _lobbyRefreshInFlight = true;
             LobbyList.IsEnabled = false;
             LobbyEmptyState.Visibility = Visibility.Visible;
             TxtLobbyEmptyTitle.Text = "SCANNING PUBLIC OPERATIONS";
@@ -643,6 +663,7 @@ namespace SeapowerMultiplayer.Launcher
             finally
             {
                 LobbyList.IsEnabled = true;
+                _lobbyRefreshInFlight = false;
             }
         }
 
@@ -661,7 +682,11 @@ namespace SeapowerMultiplayer.Launcher
             SaveUIToConfig();
 
             var escapedName = _config.Settings.PublicLobbyName.Replace("\"", "");
-            CloseLobbyBrowser();
+            GameCommandService.WriteCreatePublicLobby(
+                _config.Settings.PublicLobbyName,
+                openInviteOverlay: true);
+            TxtLobbyServiceStatus.Text =
+                $"CREATING PUBLIC OPERATION // {_config.Settings.PublicLobbyName.ToUpperInvariant()}";
             await LaunchGameAsync(
                 $"+sp4p_public_host +sp4p_lobby_name \"{escapedName}\"",
                 "Starting public Steam operation...");
@@ -676,6 +701,7 @@ namespace SeapowerMultiplayer.Launcher
             RbClient.IsChecked = true;
             ChkAutoConnect.IsChecked = false;
             SaveUIToConfig();
+            GameCommandService.WriteJoinLobby(selected.SteamLobbyId);
             CloseLobbyBrowser();
 
             await LobbyServiceClient.TrackAsync(
@@ -822,13 +848,21 @@ namespace SeapowerMultiplayer.Launcher
             var bepinex = GameDetector.IsBepInExInstalled(gameDir);
             var mod = GameDetector.IsModInstalled(gameDir);
             var proxy = GameDetector.IsProxyStored(gameDir);
+            _activePluginConflict = Installer.HasActiveConflictingPlugin(gameDir);
 
-            if (bepinex && mod && proxy)
+            if (bepinex && mod && proxy && !_activePluginConflict)
             {
                 StatusDot.Fill = FindResource("SuccessGreen") as SolidColorBrush;
                 TxtInstallStatus.Text = "Installed";
                 BtnInstall.Content = "Repair";
                 BtnLaunch.IsEnabled = !_gameRunning;
+            }
+            else if (_activePluginConflict)
+            {
+                StatusDot.Fill = FindResource("ErrorRed") as SolidColorBrush;
+                TxtInstallStatus.Text = "Repair removes old mod";
+                BtnInstall.Content = "Repair";
+                BtnLaunch.IsEnabled = false;
             }
             else if (bepinex && !proxy)
             {
@@ -961,7 +995,8 @@ namespace SeapowerMultiplayer.Launcher
                         GameDetector.IsValidGameDir(gameDir) &&
                         GameDetector.IsBepInExInstalled(gameDir) &&
                         GameDetector.IsModInstalled(gameDir) &&
-                        GameDetector.IsProxyStored(gameDir);
+                        GameDetector.IsProxyStored(gameDir) &&
+                        !_activePluginConflict;
             if (!valid && updateUi)
                 UpdateInstallStatus();
             return valid;
@@ -1066,7 +1101,7 @@ namespace SeapowerMultiplayer.Launcher
                 ConfigManager.WriteBepInExConfig(gameDir, _config.Settings);
                 TxtStatus.Text = launchStatus;
                 _gameRunning = true;
-                BtnLaunch.IsEnabled = false;
+                SetControlsEnabled(false);
                 _musicPlayer.Pause();
 
                 await GameLauncher.LaunchAsync(gameDir, () =>
@@ -1092,6 +1127,7 @@ namespace SeapowerMultiplayer.Launcher
             {
                 _gameRunning = false;
                 TxtStatus.Text = $"Launch failed: {ex.Message}";
+                SetControlsEnabled(true);
                 UpdateInstallStatus();
                 if (_config.Settings.MusicEnabled)
                     _musicPlayer.Play();

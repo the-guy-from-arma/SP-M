@@ -18,6 +18,7 @@
     <Compile Include="..\..\src\Gameplay\NeutralOrderPolicy.cs" Link="NeutralOrderPolicy.cs" />
     <Compile Include="..\..\src\Networking\SteamFragmenter.cs" Link="SteamFragmenter.cs" />
     <Compile Include="..\..\src\Net2\ProtocolInfo.cs" Link="ProtocolInfo.cs" />
+    <Compile Include="..\..\src\Net2\HandshakeCompatibility.cs" Link="HandshakeCompatibility.cs" />
     <Compile Include="..\..\src\PluginInfo.cs" Link="PluginInfo.cs" />
   </ItemGroup>
 </Project>

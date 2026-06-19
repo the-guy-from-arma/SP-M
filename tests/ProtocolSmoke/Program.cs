@@ -8,10 +8,31 @@ static class Program
 {
     static void Main()
     {
-        Assert(ProtocolInfo.ProtocolVersion == 402, "four-player protocol version");
+        Assert(ProtocolInfo.ProtocolVersion == 403, "four-player protocol version");
         Assert(ProtocolInfo.ClientUidBase(2) == 100_000_000, "player 2 UID band");
         Assert(ProtocolInfo.ClientUidBase(3) == 110_000_000, "player 3 UID band");
         Assert(ProtocolInfo.ClientUidBase(4) == 120_000_000, "player 4 UID band");
+        Assert(
+            HandshakeCompatibility.GetRefusalReason(
+                ProtocolInfo.ProtocolVersion,
+                PluginInfo.PLUGIN_VERSION,
+                true,
+                true) == null,
+            "matching handshake is accepted");
+        Assert(
+            HandshakeCompatibility.GetRefusalReason(
+                402,
+                PluginInfo.PLUGIN_VERSION,
+                true,
+                true)?.Contains("Protocol mismatch") == true,
+            "old protocol is refused");
+        Assert(
+            HandshakeCompatibility.GetRefusalReason(
+                ProtocolInfo.ProtocolVersion,
+                "0.1.5",
+                true,
+                true)?.Contains("Plugin version mismatch") == true,
+            "mixed plugin versions are refused");
 
         var hello = RoundTrip(new HelloMessage
         {
