@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <AssemblyName>SeaPowerFourPlayerLauncher</AssemblyName>
+    <RootNamespace>SeapowerMultiplayer.Launcher</RootNamespace>
+    <ApplicationIcon>SP4P.ico</ApplicationIcon>
+    <Version>0.6.0</Version>
+    <AssemblyVersion>0.6.0.0</AssemblyVersion>
+    <FileVersion>0.6.0.0</FileVersion>
+    <Product>Sea Power Four Player Launcher</Product>
+    <Company>Thunder Buddies Studios</Company>
+    <Description>Self-contained installer and launcher for Sea Power Four Player.</Description>
+  </PropertyGroup>
+
+  <!-- Embed the tested four-player plugin payload directly into the single EXE. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\src\bin\Release\net472\SeaPowerFourPlayer.dll"
+                      LogicalName="SeaPowerFourPlayer.dll" />
+    <EmbeddedResource Include="..\src\bin\Release\net472\LiteNetLib.dll"
+                      LogicalName="LiteNetLib.dll"
+                      Condition="Exists('..\src\bin\Release\net472\LiteNetLib.dll')" />
+  </ItemGroup>
+
+  <!-- BepInEx bootstrap and cinematic media are also packed into the EXE. -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\BepInEx_win_x64_5.4.23.5.zip"
+                      LogicalName="BepInEx.zip" />
+    <Resource Include="Assets\*.png" />
+    <Resource Include="Assets\Broll\frame-000.jpg" />
+    <Resource Include="Assets\Video\sea-power-launch-trailer.mp4" />
+    <Resource Include="Assets\Music\*.mp3" />
+  </ItemGroup>
+
+</Project>

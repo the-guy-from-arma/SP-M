@@ -1,0 +1,1010 @@
+using HarmonyLib;
+using SeaPower;
+using SeapowerMultiplayer.Transport;
+using System.Reflection;
+using UnityEngine;
+
+namespace SeapowerMultiplayer
+{
+    /// <summary>
+    /// In-game overlay. Toggle with Ctrl+F9.
+    /// Shows connection status, ping, time compression controls, and sync health.
+    /// </summary>
+    public class MultiplayerUI : MonoBehaviour
+    {
+        private bool _visible = true;
+
+        // Styles created once
+        private GUIStyle? _boxStyle;
+        private GUIStyle? _labelStyle;
+        private GUIStyle? _headerStyle;
+        private GUIStyle? _buttonStyle;
+        private GUIStyle? _warningStyle;
+        private GUIStyle? _successStyle;
+        private GUIStyle? _criticalStyle;
+        private GUIStyle? _elevatedStyle;
+        private GUIStyle? _sectionHeaderStyle;
+        private GUIStyle? _sectionTitleStyle;
+        private GUIStyle? _dimLabelStyle;
+        private GUIStyle? _separatorStyle;
+        private GUIStyle? _popupBoxStyle;
+        private GUIStyle? _teamLabelStyle;
+        private GUIStyle? _dropdownBoxStyle;
+        private GUIStyle? _collapseButtonStyle;
+        private bool _stylesInit = false;
+
+        // Procedural background textures (created once in InitStyles)
+        private Texture2D? _panelBgTex;
+        private Texture2D? _sectionBgTex;
+        private Texture2D? _btnNormalTex;
+        private Texture2D? _btnHoverTex;
+        private Texture2D? _btnActiveTex;
+        private Texture2D? _sepTex;
+        private Texture2D? _alertBgTex;
+        private Texture2D? _dropdownBgTex;
+        private Texture2D? _sectionTitleBgTex;
+
+        // Cached unit counts (refreshed every 0.5s instead of every OnGUI frame)
+        private float _unitCountTimer;
+        private int _ownVessels, _ownSubs, _ownAir, _ownLand, _ownMissiles, _ownTorps;
+        private int _enemyVessels, _enemySubs, _enemyAir, _enemyLand, _enemyMissiles, _enemyTorps;
+
+        // Reflection for missile/torpedo ownership
+        private static readonly FieldInfo _launchPlatformField =
+            AccessTools.Field(typeof(WeaponBase), "_launchPlatform");
+
+        private const int PanelWidth  = 360;
+        private const int Margin     = 10;
+
+        // Auto-sized panel: track content height from previous frame
+        private float _contentHeight = 200f;
+        private Vector2 _scrollPos;
+
+        // Foldout state for sync health sections
+        private bool _foldUnits = true;
+        private bool _foldProjectiles;
+
+        // Toggle for showing/hiding sync health section panels
+        private bool _syncPanelsVisible = false;
+
+        // Panel expand/collapse state (clickable header toggle)
+        private bool _panelExpanded = true;
+
+        // Scroll hysteresis - prevents flicker when content is near the boundary
+        private bool _scrollActive = false;
+
+        // Overall sync status
+        private enum SyncStatus { OK, Degraded, Issues }
+
+        private void Update()
+        {
+            if ((Input.GetKey(KeyCode.LeftControl) || Input.GetKey(KeyCode.RightControl)) && Input.GetKeyDown(KeyCode.F9))
+                _visible = !_visible;
+
+            _unitCountTimer -= Time.deltaTime;
+            if (_unitCountTimer <= 0f)
+            {
+                _unitCountTimer = 0.5f;
+                RefreshUnitCounts();
+            }
+        }
+
+        private void RefreshUnitCounts()
+        {
+            bool isPvP = Plugin.Instance.CfgPvP.Value;
+            var playerTf = Globals._playerTaskforce;
+
+            _ownVessels = _ownSubs = _ownAir = _ownLand = _ownMissiles = _ownTorps = 0;
+            _enemyVessels = _enemySubs = _enemyAir = _enemyLand = _enemyMissiles = _enemyTorps = 0;
+
+            foreach (var v in Object.FindObjectsByType<Vessel>(FindObjectsSortMode.None))
+            {
+                if (isPvP && playerTf != null && v._taskforce == playerTf) _ownVessels++;
+                else _enemyVessels++;
+            }
+            foreach (var s in Object.FindObjectsByType<Submarine>(FindObjectsSortMode.None))
+            {
+                if (isPvP && playerTf != null && s._taskforce == playerTf) _ownSubs++;
+                else _enemySubs++;
+            }
+            foreach (var a in Object.FindObjectsByType<Aircraft>(FindObjectsSortMode.None))
+            {
+                if (isPvP && playerTf != null && a._taskforce == playerTf) _ownAir++;
+                else _enemyAir++;
+            }
+            foreach (var h in Object.FindObjectsByType<Helicopter>(FindObjectsSortMode.None))
+            {
+                if (isPvP && playerTf != null && h._taskforce == playerTf) _ownAir++;
+                else _enemyAir++;
+            }
+            foreach (var l in Object.FindObjectsByType<LandUnit>(FindObjectsSortMode.None))
+            {
+                if (isPvP && playerTf != null && l._taskforce == playerTf) _ownLand++;
+                else _enemyLand++;
+            }
+            foreach (var m in Object.FindObjectsByType<Missile>(FindObjectsSortMode.None))
+            {
+                var launcher = _launchPlatformField?.GetValue(m) as ObjectBase;
+                if (isPvP && playerTf != null && launcher != null && launcher._taskforce == playerTf) _ownMissiles++;
+                else _enemyMissiles++;
+            }
+            foreach (var t in Object.FindObjectsByType<Torpedo>(FindObjectsSortMode.None))
+            {
+                var launcher = _launchPlatformField?.GetValue(t) as ObjectBase;
+                if (isPvP && playerTf != null && launcher != null && launcher._taskforce == playerTf) _ownTorps++;
+                else _enemyTorps++;
+            }
+
+        }
+
+        private void InitStyles()
+        {
+            if (_stylesInit) return;
+
+            // ── Procedural background textures ──────────────────────────────
+            _panelBgTex      = MakeRoundedTex(64, 64, new Color(0.055f, 0.08f,  0.130f, 0.68f), 8);
+            _sectionBgTex    = MakeRoundedTex(32, 32, new Color(0.095f, 0.135f, 0.205f, 0.55f), 4);
+            _sectionTitleBgTex = MakeRoundedTex(32, 32, new Color(0.10f, 0.16f, 0.255f, 0.52f), 4);
+            _btnNormalTex    = MakeRoundedTex(32, 32, new Color(0.13f,  0.195f, 0.315f, 0.62f), 4);
+            _btnHoverTex     = MakeRoundedTex(32, 32, new Color(0.19f,  0.275f, 0.430f, 0.75f), 4);
+            _btnActiveTex    = MakeRoundedTex(32, 32, new Color(0.25f,  0.375f, 0.560f, 0.85f), 4);
+            _sepTex          = MakeTex(4, 4, new Color(0.22f,  0.32f,  0.460f, 0.40f));
+            _alertBgTex      = MakeRoundedTex(64, 64, new Color(0.10f,  0.065f, 0.065f, 0.78f), 8);
+            _dropdownBgTex   = MakeRoundedTex(32, 32, new Color(0.07f,  0.10f,  0.155f, 0.72f), 6);
+
+            // ── Panel / box (main container) ─────────────────────────────────
+            _boxStyle = new GUIStyle()
+            {
+                padding = new RectOffset(10, 10, 10, 10),
+                border  = new RectOffset(8, 8, 8, 8),
+                normal  = { background = _panelBgTex },
+            };
+
+            // ── Vote popup box (alert style) ─────────────────────────────────
+            _popupBoxStyle = new GUIStyle()
+            {
+                padding = new RectOffset(14, 14, 12, 12),
+                border  = new RectOffset(8, 8, 8, 8),
+                normal  = { background = _alertBgTex },
+            };
+
+            // ── Title / version header ───────────────────────────────────────
+            _headerStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontStyle = FontStyle.Bold,
+                fontSize  = 14,
+                padding   = new RectOffset(0, 0, 2, 2),
+                normal    = { textColor = new Color(0.82f, 0.91f, 1.00f) },
+            };
+
+            // ── Regular body label ───────────────────────────────────────────
+            _labelStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 11,
+                normal   = { textColor = new Color(0.78f, 0.85f, 0.92f) },
+            };
+
+            // ── Dim / secondary text ─────────────────────────────────────────
+            _dimLabelStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize = 10,
+                normal   = { textColor = new Color(0.46f, 0.52f, 0.62f) },
+            };
+
+            // ── Section divider title (Network / Players / Time Control) ─────
+            _sectionTitleStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontStyle = FontStyle.Bold,
+                fontSize  = 11,
+                padding   = new RectOffset(6, 6, 4, 4),
+                margin    = new RectOffset(0, 0, 2, 2),
+                normal    = { textColor  = new Color(0.50f, 0.80f, 0.98f),
+                              background = _sectionTitleBgTex },
+            };
+
+            // ── Foldout section header (Sync Health subsections) ─────────────
+            _sectionHeaderStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontStyle = FontStyle.Bold,
+                fontSize  = 11,
+                padding   = new RectOffset(4, 4, 3, 3),
+                normal    = { textColor  = new Color(0.48f, 0.76f, 0.96f),
+                              background = _sectionBgTex },
+            };
+
+            // ── Team label (BLUE TEAM / RED TEAM) ────────────────────────────
+            _teamLabelStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontStyle = FontStyle.Bold,
+                fontSize  = 10,
+                padding   = new RectOffset(4, 4, 3, 3),
+                normal    = { textColor = new Color(0.46f, 0.52f, 0.62f) },
+            };
+
+            // ── Status / badge text ──────────────────────────────────────────
+            _warningStyle  = MakeBoldLabel(new Color(1.00f, 0.72f, 0.15f)); // Amber
+            _successStyle  = MakeBoldLabel(new Color(0.28f, 0.95f, 0.48f)); // Green
+            _elevatedStyle = MakeBoldLabel(new Color(1.00f, 1.00f, 0.28f)); // Yellow
+            _criticalStyle = MakeBoldLabel(new Color(1.00f, 0.28f, 0.28f)); // Red
+
+            // ── Buttons ──────────────────────────────────────────────────────
+            _buttonStyle = new GUIStyle(GUI.skin.button)
+            {
+                fontSize    = 11,
+                fontStyle   = FontStyle.Bold,
+                fixedHeight = 24,
+                padding     = new RectOffset(8, 8, 4, 4),
+                border      = new RectOffset(4, 4, 4, 4),
+                normal      = { background = _btnNormalTex,
+                                textColor  = new Color(0.80f, 0.88f, 0.98f) },
+                hover       = { background = _btnHoverTex,
+                                textColor  = new Color(0.92f, 0.96f, 1.00f) },
+                active      = { background = _btnActiveTex,
+                                textColor  = new Color(1.00f, 1.00f, 1.00f) },
+            };
+
+            // ── Thin horizontal separator ────────────────────────────────────
+            _separatorStyle = new GUIStyle()
+            {
+                fixedHeight = 1,
+                margin      = new RectOffset(0, 0, 5, 5),
+                normal      = { background = _sepTex },
+            };
+
+            // ── TF dropdown box ─────────────────────────────────────────────
+            _dropdownBoxStyle = new GUIStyle(GUI.skin.box)
+            {
+                padding = new RectOffset(4, 4, 4, 4),
+                border  = new RectOffset(6, 6, 6, 6),
+                normal  = { background = _dropdownBgTex },
+            };
+
+            // ── Collapse/expand toggle button (compact, no bg) ────────────
+            _collapseButtonStyle = new GUIStyle(GUI.skin.label)
+            {
+                fontSize    = 16,
+                fontStyle   = FontStyle.Bold,
+                fixedWidth  = 24,
+                fixedHeight = 22,
+                alignment   = TextAnchor.MiddleCenter,
+                padding     = new RectOffset(0, 0, 0, 0),
+                normal      = { textColor = new Color(0.50f, 0.70f, 0.92f) },
+                hover       = { textColor = new Color(0.75f, 0.90f, 1.00f) },
+            };
+
+            _stylesInit = true;
+        }
+
+        private static GUIStyle MakeBoldLabel(Color color) => new GUIStyle(GUI.skin.label)
+        {
+            fontSize  = 11,
+            fontStyle = FontStyle.Bold,
+            normal    = { textColor = color },
+        };
+
+        private static Texture2D MakeTex(int width, int height, Color col)
+        {
+            var pix = new Color[width * height];
+            for (int i = 0; i < pix.Length; i++) pix[i] = col;
+            var tex = new Texture2D(width, height);
+            tex.SetPixels(pix);
+            tex.Apply();
+            return tex;
+        }
+
+        /// <summary>
+        /// Creates a texture with rounded corners. The <paramref name="radius"/> controls
+        /// corner curvature (in pixels). Pixels outside the rounded rect are fully transparent.
+        /// </summary>
+        private static Texture2D MakeRoundedTex(int width, int height, Color fill, int radius)
+        {
+            var tex = new Texture2D(width, height, TextureFormat.ARGB32, false);
+            var clear = new Color(0, 0, 0, 0);
+            int r2 = radius * radius;
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    // Determine the closest corner center for SDF
+                    int cx = x < radius ? radius : (x >= width  - radius ? width  - 1 - radius : x);
+                    int cy = y < radius ? radius : (y >= height - radius ? height - 1 - radius : y);
+                    int dx = x - cx;
+                    int dy = y - cy;
+                    float dist2 = dx * dx + dy * dy;
+
+                    if (dist2 <= r2)
+                    {
+                        // Inside the rounded rect - apply slight AA at the edge
+                        float dist = Mathf.Sqrt(dist2);
+                        float edge = Mathf.Clamp01(radius - dist + 0.5f);
+                        tex.SetPixel(x, y, new Color(fill.r, fill.g, fill.b, fill.a * edge));
+                    }
+                    else
+                    {
+                        tex.SetPixel(x, y, clear);
+                    }
+                }
+            }
+            tex.Apply();
+            return tex;
+        }
+
+        // Draws a full-width styled section title bar (Network, Players, etc.)
+        private void DrawSectionTitle(string icon, string title)
+        {
+            GUILayout.Space(2);
+            GUILayout.Label($"{icon}  {title}", _sectionTitleStyle!, GUILayout.ExpandWidth(true));
+            GUILayout.Box("", _separatorStyle!, GUILayout.ExpandWidth(true));
+        }
+
+        private void OnGUI()
+        {
+            InitStyles();
+
+            // Vote popup is always visible, even when the main panel is hidden
+            DrawTimeVotePopup();
+
+            if (!_visible) return;
+
+            float x = Screen.width - PanelWidth - Margin;
+            float maxHeight = Screen.height - Margin * 2;
+            // Hysteresis: enter scroll at maxHeight, exit only when content shrinks 30px below
+            bool needsScroll = _scrollActive
+                ? _contentHeight > maxHeight - 30f
+                : _contentHeight > maxHeight;
+            _scrollActive = needsScroll;
+
+            // Outer area is just for positioning - transparent, full available height
+            GUILayout.BeginArea(new Rect(x, Margin, PanelWidth, maxHeight));
+
+            if (needsScroll)
+            {
+                _scrollPos = GUILayout.BeginScrollView(_scrollPos, false, false,
+                    GUIStyle.none, GUI.skin.verticalScrollbar, _boxStyle!,
+                    GUILayout.MaxHeight(maxHeight));
+                // Inner group so we can measure true content height (not clipped by scroll)
+                GUILayout.BeginVertical();
+            }
+            else
+            {
+                // Styled vertical group auto-sizes to content - no stale height
+                GUILayout.BeginVertical(_boxStyle);
+            }
+
+            DrawHeader();
+
+            // If panel is collapsed, only show the header
+            if (!_panelExpanded)
+            {
+                GUILayout.EndVertical();
+                if (Event.current.type == EventType.Repaint)
+                    _contentHeight = GUILayoutUtility.GetLastRect().height;
+
+                if (needsScroll)
+                    GUILayout.EndScrollView();
+
+                GUILayout.EndArea();
+                return;
+            }
+
+            GUILayout.Space(4);
+            DrawConnection();
+            GUILayout.Space(6);
+            DrawLobby();
+            GUILayout.Space(6);
+            DrawTimeControls();
+            GUILayout.Space(6);
+
+            if (NetworkManager.Instance.IsConnected)
+                DrawSyncHealth();
+
+            GUILayout.Space(6);
+            DrawNet2Telemetry();
+
+            // End the inner vertical - GetLastRect gives true content height
+            GUILayout.EndVertical();
+            if (Event.current.type == EventType.Repaint)
+                _contentHeight = GUILayoutUtility.GetLastRect().height;
+
+            if (needsScroll)
+                GUILayout.EndScrollView();
+
+            GUILayout.EndArea();
+        }
+
+        // ── Time Vote Popup ──────────────────────────────────────────────────
+
+        private void DrawTimeVotePopup()
+        {
+            if (!TimeSyncManager.HasPendingProposal) return;
+
+            const float popupWidth  = 320f;
+            const float popupHeight = 110f;
+            float px = (Screen.width  - popupWidth)  / 2f;
+            float py = (Screen.height - popupHeight) / 2f;
+
+            GUILayout.BeginArea(new Rect(px, py, popupWidth, popupHeight), _popupBoxStyle);
+
+            bool isHost = Plugin.Instance.CfgIsHost.Value;
+            string who = isHost ? "Client" : "Host";
+
+            GUILayout.Label($"\u23f1  Time Change Request", _sectionTitleStyle!, GUILayout.ExpandWidth(true));
+            GUILayout.Space(6);
+            GUILayout.Label($"{who} proposes:  {TimeSyncManager.ProposalDescription}", _warningStyle);
+            GUILayout.Space(8);
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("\u2714  Agree", _buttonStyle))
+                TimeSyncManager.AcceptProposal();
+            GUILayout.Space(6);
+            if (GUILayout.Button("\u2716  Decline", _buttonStyle))
+                TimeSyncManager.DeclineProposal();
+            GUILayout.EndHorizontal();
+
+            GUILayout.EndArea();
+        }
+
+        // ── Header ────────────────────────────────────────────────────────────
+
+        private void DrawHeader()
+        {
+            GUILayout.BeginHorizontal();
+
+            // Collapse/expand toggle icon
+            string collapseIcon = _panelExpanded ? "\u25bc" : "\u25b6";
+            if (GUILayout.Button(collapseIcon, _collapseButtonStyle))
+                _panelExpanded = !_panelExpanded;
+
+            // Show overall sync status dot in header (green/yellow/red)
+            if (NetworkManager.Instance.IsConnected)
+            {
+                var overall = ComputeOverallStatus();
+                GUILayout.Label("\u25cf", StatusStyle(overall), GUILayout.Width(14));
+            }
+
+            GUILayout.Label($"Sea Power 4P  v{PluginInfo.PLUGIN_VERSION}", _headerStyle);
+            GUILayout.FlexibleSpace();
+            if (Plugin.Instance.CfgPvP.Value)
+                GUILayout.Label("PvP", _warningStyle);
+            GUILayout.EndHorizontal();
+
+            if (_panelExpanded)
+                GUILayout.Box("", _separatorStyle!, GUILayout.ExpandWidth(true));
+        }
+
+        // ── Connection section ────────────────────────────────────────────────
+
+        private void DrawConnection()
+        {
+            bool isSteam = Plugin.Instance.CfgTransport.Value.Equals(
+                "Steam", System.StringComparison.OrdinalIgnoreCase);
+
+            if (isSteam)
+                DrawConnectionSteam();
+            else
+                DrawConnectionLiteNet();
+        }
+
+        private void DrawConnectionLiteNet()
+        {
+            bool isHost      = Plugin.Instance.CfgIsHost.Value;
+            bool isConnected = NetworkManager.Instance.IsConnected;
+            bool isHostRunning = NetworkManager.Instance.IsHostRunning;
+            string statusStr;
+            Color statusCol;
+
+            DrawSectionTitle("\u2302", "NETWORK");
+
+            // Mode + status
+            string modeStr   = isHost ? "HOST" : "CLIENT";
+
+            if (isConnected)
+            {
+                statusStr = isHost
+                    ? $"{NetworkManager.Instance.EstablishedClientCount}/3 clients"
+                    : "Connected";
+                statusCol = new Color(0.3f, 1f, 0.4f); //Green
+            }
+            else if (isHostRunning)
+            {
+                statusStr = "Listening";
+                statusCol = new Color(1f, 0.7f, 0.2f); //Same color as _warningStyle
+            }
+            else
+            {
+                statusStr = "Disconnected";
+                statusCol = new Color(1f, 0.4f, 0.4f); //Red
+            }
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"Mode: {modeStr}", _labelStyle, GUILayout.Width(100));
+            GUILayout.FlexibleSpace();
+            var prevColor = GUI.color;
+            GUI.color = statusCol;
+            GUILayout.Label($"\u25cf  {statusStr}", _labelStyle);
+            GUI.color = prevColor;
+            GUILayout.EndHorizontal();
+
+            // Ping
+            if (isConnected)
+            {
+                GUILayout.Label($"  Ping: {NetworkManager.Instance.LastRttMs} ms", _dimLabelStyle);
+            }
+            else
+            {
+                // Port / IP info
+                if (isHost)
+                    GUILayout.Label($"Port: {Plugin.Instance.CfgPort.Value}", _labelStyle);
+                else
+                    GUILayout.Label($"Host: {Plugin.Instance.CfgHostIP.Value}:{Plugin.Instance.CfgPort.Value}", _labelStyle);
+            }
+
+            GUILayout.Space(4);
+
+            // Connect / Disconnect button
+            if (!isConnected)
+            {
+                //Adjust button verbage depending on if the game is serving or a client
+                string btnLabel;
+                if (isHost && !isHostRunning)
+                {
+                    btnLabel = "Start Hosting";
+                }    
+                else if (isHost && isHostRunning)
+                {
+                    btnLabel = "Stop Hosting";
+                }
+                else
+                {
+                    btnLabel = "Connect";
+                }
+
+                if (GUILayout.Button(btnLabel, _buttonStyle))
+                {
+                    if (isHost && !isHostRunning)
+                    {
+                        NetworkManager.Instance.StartHost(Plugin.Instance.CfgPort.Value);
+                    }
+                    else if (isHost && isHostRunning)
+                    {
+                        NetworkManager.Instance.Stop();
+                    }
+                    else
+                        NetworkManager.Instance.StartClient(Plugin.Instance.CfgHostIP.Value, Plugin.Instance.CfgPort.Value);
+                }
+            }
+            else
+            {
+                if (GUILayout.Button("Disconnect", _buttonStyle))
+                    NetworkManager.Instance.Stop();
+
+                if (isHost)
+                {
+                    GUILayout.Space(4);
+                    DrawHostSyncButton();
+                }
+            }
+
+            DrawSyncState(isHost);
+        }
+
+        private void DrawConnectionSteam()
+        {
+            bool isConnected = NetworkManager.Instance.IsConnected;
+            bool inLobby     = SteamLobbyManager.InLobby;
+            string modeStr;
+            Color  statusCol;
+            string statusStr;
+
+            DrawSectionTitle("\u2302", "NETWORK");
+
+            if (isConnected)
+            {
+                modeStr = NetworkManager.Instance.IsHost ? "STEAM (HOST)" : "STEAM (CLIENT)";
+                statusCol = new Color(0.3f, 1f, 0.4f);
+                statusStr = NetworkManager.Instance.IsHost
+                    ? $"{NetworkManager.Instance.EstablishedClientCount}/3 clients"
+                    : "Connected";
+            }
+            else if (inLobby)
+            {
+                modeStr = Plugin.Instance.CfgIsHost.Value
+                    ? "STEAM (HOST LOBBY)"
+                    : "STEAM (CLIENT LOBBY)";
+                statusCol = new Color(1f, 1f, 0.3f);
+                statusStr = "In Lobby";
+            }
+            else
+            {
+                modeStr = "STEAM";
+                statusCol = new Color(1f, 0.4f, 0.4f);
+                statusStr = "Not in lobby";
+            }
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label($"Mode: {modeStr}", _labelStyle, GUILayout.Width(160));
+            GUILayout.FlexibleSpace();
+            var prevColor = GUI.color;
+            GUI.color = statusCol;
+            GUILayout.Label($"\u25cf  {statusStr}", _labelStyle);
+            GUI.color = prevColor;
+            GUILayout.EndHorizontal();
+
+            if (isConnected)
+            {
+                GUILayout.Label($"  Ping: {NetworkManager.Instance.LastRttMs} ms", _dimLabelStyle);
+            }
+            else if (inLobby)
+            {
+                GUILayout.Label($"Lobby: {SteamLobbyManager.MemberCount}/4 players", _labelStyle);
+            }
+
+            GUILayout.Space(4);
+
+            if (isConnected)
+            {
+                // Connected state
+                if (GUILayout.Button("Disconnect", _buttonStyle))
+                    SteamLobbyManager.LeaveLobby();
+
+                if (NetworkManager.Instance.IsHost)
+                {
+                    GUILayout.Space(4);
+                    DrawHostSyncButton();
+                }
+            }
+            else if (inLobby)
+            {
+                // In lobby, waiting for peer
+                if (GUILayout.Button("Invite Friend", _buttonStyle))
+                    SteamLobbyManager.InviteFriend();
+
+                GUILayout.Space(2);
+
+                if (GUILayout.Button("Leave Lobby", _buttonStyle))
+                    SteamLobbyManager.LeaveLobby();
+            }
+            else
+            {
+                // Not in lobby - choose invite-only or public directory visibility.
+                if (GUILayout.Button("Create Friends Lobby", _buttonStyle))
+                    SteamLobbyManager.CreateLobby();
+                GUILayout.Space(2);
+                if (GUILayout.Button("Create Public Lobby", _buttonStyle))
+                    SteamLobbyManager.CreatePublicLobby();
+            }
+
+            DrawSyncState(NetworkManager.Instance.IsHost);
+        }
+
+        private void DrawLobby()
+        {
+            DrawSectionTitle("\u2630", "FOUR-PLAYER LOBBY");
+
+            foreach (var slot in FourPlayerLobby.Slots)
+            {
+                GUILayout.BeginHorizontal();
+                string team = slot.Team == 0 ? "BLUE" : slot.Team == 1 ? "RED" : "NEUT";
+                string role = TaskforceAssignmentManager.RoleName(slot.Role);
+                string name = slot.Connected ? slot.Name : "(open)";
+                string ready = slot.Connected ? (slot.Ready ? "READY" : "WAIT") : "";
+                GUILayout.Label($"P{slot.Slot}", _teamLabelStyle, GUILayout.Width(24));
+                GUILayout.Label(team,
+                    slot.Team == 0 ? _successStyle
+                    : slot.Team == 1 ? _criticalStyle
+                    : _warningStyle,
+                    GUILayout.Width(42));
+                GUILayout.Label(role, _dimLabelStyle, GUILayout.Width(68));
+                GUILayout.Label(name, _labelStyle, GUILayout.Width(110));
+                GUILayout.FlexibleSpace();
+                GUILayout.Label(ready, slot.Ready ? _successStyle : _warningStyle, GUILayout.Width(40));
+                GUILayout.EndHorizontal();
+            }
+
+            if (!NetworkManager.Instance.IsEstablished || Plugin.Instance.CfgIsHost.Value)
+                return;
+
+            GUILayout.Space(4);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(FourPlayerLobby.LocalReady ? "Unready" : "Ready", _buttonStyle))
+                NetworkManager.Instance.SendLobbyUpdate(
+                    FourPlayerLobby.LocalSlot,
+                    FourPlayerLobby.LocalTeam,
+                    (byte)TaskforceAssignmentManager.LocalRole,
+                    !FourPlayerLobby.LocalReady);
+            GUILayout.EndHorizontal();
+
+            if (Plugin.Instance.CfgPvP.Value)
+            {
+                string assignment = FourPlayerLobby.LocalTeam == 0 ? "Blue combat team"
+                    : FourPlayerLobby.LocalTeam == 1 ? "Red combat team"
+                    : "Neutral navigation only";
+                GUILayout.Label($"Assignment: {assignment}", _dimLabelStyle);
+            }
+
+            var nextRole = (ControlRole)(((byte)TaskforceAssignmentManager.LocalRole + 1) % 5);
+            if (GUILayout.Button($"Role: {TaskforceAssignmentManager.LocalRole} (click to change)", _buttonStyle))
+                NetworkManager.Instance.SendLobbyUpdate(
+                    FourPlayerLobby.LocalSlot, FourPlayerLobby.LocalTeam, (byte)nextRole, false);
+
+            if (GUILayout.Button("Move to next open slot", _buttonStyle))
+            {
+                byte next = FourPlayerLobby.LocalSlot >= 4
+                    ? (byte)2
+                    : (byte)(FourPlayerLobby.LocalSlot + 1);
+                NetworkManager.Instance.SendLobbyUpdate(
+                    next, FourPlayerLobby.LocalTeam,
+                    (byte)TaskforceAssignmentManager.LocalRole, false);
+            }
+        }
+
+        private void DrawSyncState(bool isHost)
+        {
+            var state = SimSyncManager.CurrentState;
+            if (state == SimState.Idle) return;
+
+            GUILayout.Space(2);
+
+            switch (state)
+            {
+                case SimState.WaitingForClient:
+                    GUILayout.Label($"Waiting for clients: {SimSyncManager.ReadyClientCount}/{SimSyncManager.WaitingClientCount}", _warningStyle);
+                    break;
+                case SimState.Synchronized when GameTime.IsPaused():
+                    GUILayout.Label("All clients ready - unpause to begin", _successStyle);
+                    break;
+                case SimState.Synchronized:
+                    GUILayout.Label("Sim synced", _successStyle);
+                    break;
+            }
+
+            if (!isHost && SessionManager.IsReceiving)
+            {
+                GUILayout.Label("Receiving scene...", _warningStyle);
+            }
+        }
+
+        private void DrawHostSyncButton()
+        {
+            int pendingBytes = NetworkManager.Instance.PendingReliableBytes;
+            int pendingPackets = NetworkManager.Instance.PendingReliablePackets;
+            bool hasClients = NetworkManager.Instance.EstablishedClientCount > 0;
+            bool lobbyReady = FourPlayerLobby.AllConnectedReady;
+            bool canSend = hasClients && lobbyReady && pendingBytes == 0;
+
+            bool wasEnabled = GUI.enabled;
+            GUI.enabled = canSend;
+            if (GUILayout.Button("Send State & Wait", _buttonStyle))
+                SessionManager.CaptureAndSend();
+            GUI.enabled = wasEnabled;
+
+            if (pendingBytes > 0)
+            {
+                float mb = pendingBytes / (1024f * 1024f);
+                GUILayout.Label($"Sending state: {mb:F2} MB queued ({pendingPackets} packets)",
+                    _warningStyle);
+            }
+            else if (!hasClients)
+            {
+                GUILayout.Label("Waiting for at least one connected client.", _dimLabelStyle);
+            }
+            else if (!lobbyReady)
+            {
+                GUILayout.Label("All connected clients must mark READY.", _warningStyle);
+            }
+        }
+
+        // ── Time compression section ──────────────────────────────────────────
+
+        private void DrawTimeControls()
+        {
+            DrawSectionTitle("\u23f1", "TIME CONTROL");
+
+            float tc      = GameTime.TimeCompression;
+            bool  paused  = GameTime.IsPaused();
+            bool  isHost  = Plugin.Instance.CfgIsHost.Value;
+            bool  connected = NetworkManager.Instance.IsConnected;
+
+            // Current state display
+            string timeStr = paused ? "PAUSED" : $"{tc:0.#}x";
+            GUILayout.Label($"Time: {timeStr}", _labelStyle);
+
+            // Time buttons - always show, but client sends request to host
+            GUILayout.BeginHorizontal();
+
+            if (GUILayout.Button("<<", _buttonStyle, GUILayout.Width(40)))
+                TimeSyncManager.RequestDecrease();
+
+            if (paused)
+            {
+                if (GUILayout.Button("\u25b6 Play", _buttonStyle))
+                    TimeSyncManager.RequestUnpause();
+            }
+            else
+            {
+                if (GUILayout.Button("\u23f8 Pause", _buttonStyle))
+                    TimeSyncManager.RequestPause();
+            }
+
+            if (GUILayout.Button(">>", _buttonStyle, GUILayout.Width(40)))
+                TimeSyncManager.RequestIncrease();
+
+            GUILayout.EndHorizontal();
+
+            // Pending request indicator (default mode)
+            if (TimeSyncManager.PendingRequest && !isHost)
+                GUILayout.Label("\u27f3 Waiting for host...", _warningStyle);
+
+            // Vote mode: waiting for other player to respond to our proposal
+            if (TimeSyncManager.WaitingForVoteResponse)
+                GUILayout.Label("\u27f3 Waiting for vote response...", _warningStyle);
+        }
+
+        // ── Sync Health ─────────────────────────────────────────────────────
+
+        private SyncStatus ComputeOverallStatus()
+        {
+            if (StateApplier.ShipDriftMax > 100f || StateApplier.AirDriftMax > 200f) return SyncStatus.Issues;
+            if (StateApplier.ShipDriftAvg > 20f || StateApplier.AirDriftAvg > 40f) return SyncStatus.Degraded;
+            return SyncStatus.OK;
+        }
+
+        private GUIStyle StatusStyle(SyncStatus status)
+        {
+            switch (status)
+            {
+                case SyncStatus.Issues:   return _criticalStyle!;
+                case SyncStatus.Degraded: return _elevatedStyle!;
+                default:                  return _successStyle!;
+            }
+        }
+
+        private SyncStatus SectionStatus_Units()
+        {
+            if (StateApplier.ShipDriftMax > 100f || StateApplier.AirDriftMax > 200f) return SyncStatus.Issues;
+            if (StateApplier.ShipDriftAvg > 20f || StateApplier.AirDriftAvg > 40f) return SyncStatus.Degraded;
+            return SyncStatus.OK;
+        }
+
+        private bool DrawSectionHeader(string label, bool foldout, SyncStatus status)
+        {
+            string arrow  = foldout ? "\u25bc" : "\u25b6";
+            string dot    = status == SyncStatus.OK ? "\u25cf" : status == SyncStatus.Degraded ? "\u25cf" : "\u25cf";
+            GUIStyle dotStyle = StatusStyle(status);
+
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button($" {arrow}  {label}", _sectionHeaderStyle!, GUILayout.ExpandWidth(true)))
+                foldout = !foldout;
+            GUILayout.Label(dot, dotStyle, GUILayout.Width(16));
+            GUILayout.EndHorizontal();
+            return foldout;
+        }
+
+        // ── NET v2 telemetry ─────────────────────────────────────────────────
+
+        private bool _foldNet2Counters;
+        private float _net2SampleAt;
+        private long _net2PrevBytesIn, _net2PrevBytesOut;
+        private float _net2RateInBps, _net2RateOutBps;
+
+        private static string FormatRate(float bps)
+            => bps >= 1024f * 1024f ? $"{bps / (1024f * 1024f):F2} MB/s"
+             : bps >= 1024f         ? $"{bps / 1024f:F1} KB/s"
+             : $"{bps:F0} B/s";
+
+        private void DrawNet2Telemetry()
+        {
+            DrawSectionTitle("≡", "NET v2");
+
+            var nm = NetworkManager.Instance;
+            GUILayout.Label($"  Protocol {Net2.ProtocolInfo.ProtocolVersion}  ·  Handshake: {nm.Handshake}", _labelStyle);
+
+            if (!nm.IsConnected) return;
+
+            // Sample traffic rates twice per second
+            if (Time.unscaledTime >= _net2SampleAt)
+            {
+                float dt = _net2SampleAt > 0f ? Mathf.Max(0.25f, Time.unscaledTime - (_net2SampleAt - 0.5f)) : 0.5f;
+                _net2RateInBps  = (Telemetry.TotalBytesIn  - _net2PrevBytesIn)  / dt;
+                _net2RateOutBps = (Telemetry.TotalBytesOut - _net2PrevBytesOut) / dt;
+                _net2PrevBytesIn  = Telemetry.TotalBytesIn;
+                _net2PrevBytesOut = Telemetry.TotalBytesOut;
+                _net2SampleAt = Time.unscaledTime + 0.5f;
+            }
+
+            GUILayout.Label($"  In {FormatRate(_net2RateInBps)}  ·  Out {FormatRate(_net2RateOutBps)}  ·  " +
+                $"Total ↓{Telemetry.TotalBytesIn / 1024}K ↑{Telemetry.TotalBytesOut / 1024}K", _dimLabelStyle);
+
+            var (sMin, sAvg, sMax) = Telemetry.FrameSendStats();
+            GUILayout.Label($"  Send/frame: min {sMin}B  avg {sAvg:F0}B  max {sMax}B", _dimLabelStyle);
+
+            GUILayout.Label($"  Replicas: {ReplicaRegistry.Count}  ·  weapons {WeaponReplicaDriver.ActiveReplicas}" +
+                $"  ·  air targets {AircraftReplicaDriver.ActiveTargets}  ·  ledger {CaptureState.SpawnLedger.Count}", _dimLabelStyle);
+
+            _foldNet2Counters = DrawSectionHeader("Counters", _foldNet2Counters, SyncStatus.OK);
+            if (_foldNet2Counters)
+            {
+                if (Telemetry.Counters.Count == 0)
+                {
+                    GUILayout.Label("  (no events)", _dimLabelStyle);
+                }
+                else
+                {
+                    foreach (var kv in Telemetry.Counters)
+                        GUILayout.Label($"  {kv.Key}: {kv.Value}", _dimLabelStyle);
+                }
+            }
+        }
+
+        private void DrawSyncHealth()
+        {
+            bool isPvP = Plugin.Instance.CfgPvP.Value;
+
+            // Master header - foldout toggle for all sync panels
+            var overall = ComputeOverallStatus();
+            DrawSectionTitle("\u21bb", "SYNC HEALTH");
+            
+            // Resync tip
+            GUILayout.Space(4);
+            GUILayout.Label("  Tip: Press Ctrl+F10 to force a resync", _dimLabelStyle);
+
+            _syncPanelsVisible = DrawSectionHeader("Details", _syncPanelsVisible, overall);
+            if (!_syncPanelsVisible) return;
+
+            // Summary line
+            GUILayout.Label($"  RTT: {NetworkManager.Instance.LastRttMs} ms", _dimLabelStyle);
+
+            GUILayout.Space(2);
+
+            // ── Units ────────────────────────────────────────────────────────
+            _foldUnits = DrawSectionHeader("Units", _foldUnits, SectionStatus_Units());
+            if (_foldUnits)
+            {
+                if (isPvP)
+                {
+                    GUILayout.Label($"  Ships: own {_ownVessels}  enemy {_enemyVessels}", _labelStyle);
+                    GUILayout.Label($"  Subs:  own {_ownSubs}  enemy {_enemySubs}", _labelStyle);
+                    GUILayout.Label($"  Air:   own {_ownAir}  enemy {_enemyAir}", _labelStyle);
+                    if (_ownLand + _enemyLand > 0)
+                        GUILayout.Label($"  Land:  own {_ownLand}  enemy {_enemyLand}", _labelStyle);
+                }
+                else
+                {
+                    GUILayout.Label($"  Ships: {_ownVessels + _enemyVessels}   Subs: {_ownSubs + _enemySubs}", _labelStyle);
+                    GUILayout.Label($"  Air: {_ownAir + _enemyAir}", _labelStyle);
+                    if (_ownLand + _enemyLand > 0)
+                        GUILayout.Label($"  Land: {_ownLand + _enemyLand}", _labelStyle);
+                }
+
+                // Per-category position drift
+                var shipDriftStyle = StateApplier.ShipDriftMax > 100f ? _warningStyle
+                    : StateApplier.ShipDriftAvg > 20f ? _elevatedStyle : _dimLabelStyle;
+                GUILayout.Label($"  Ship drift: {StateApplier.ShipDriftAvg:F1} avg / {StateApplier.ShipDriftMax:F1} max", shipDriftStyle);
+
+                var airDriftStyle = StateApplier.AirDriftMax > 200f ? _warningStyle
+                    : StateApplier.AirDriftAvg > 40f ? _elevatedStyle : _dimLabelStyle;
+                GUILayout.Label($"  Air drift:  {StateApplier.AirDriftAvg:F1} avg / {StateApplier.AirDriftMax:F1} max", airDriftStyle);
+            }
+
+            GUILayout.Space(2);
+
+            // ── Projectiles ──────────────────────────────────────────────────
+            _foldProjectiles = DrawSectionHeader("Projectiles", _foldProjectiles, SyncStatus.OK);
+            if (_foldProjectiles)
+            {
+                int totalMsl = _ownMissiles + _enemyMissiles;
+                int totalTorp = _ownTorps + _enemyTorps;
+                if (isPvP)
+                {
+                    GUILayout.Label($"  Missiles: {totalMsl} (own {_ownMissiles} / enemy {_enemyMissiles})", _labelStyle);
+                    GUILayout.Label($"  Torpedoes: {totalTorp} (own {_ownTorps} / enemy {_enemyTorps})", _labelStyle);
+                }
+                else
+                {
+                    GUILayout.Label($"  Missiles: {totalMsl}   Torpedoes: {totalTorp}", _labelStyle);
+                }
+            }
+        }
+    }
+}

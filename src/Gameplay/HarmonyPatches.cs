@@ -1,0 +1,2008 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
+using LiteNetLib;
+using SeaPower;
+using SeaPower.Decals;
+using SeapowerMultiplayer.Messages;
+using SeapowerUI;
+using UniRx;
+using UnityEngine;
+using VesselStates;
+
+namespace SeapowerMultiplayer
+{
+    // ── UnitRegistry lifecycle hooks ────────────────────────────────────────
+    // Harmony patches ObjectBase.Awake (non-virtual, public) and OnDestroy (private)
+    // to maintain the UnitRegistry without per-frame FindObjectsByType calls.
+
+    [HarmonyPatch(typeof(ObjectBase), "Awake")]
+    public static class Patch_ObjectBase_Register
+    {
+        static void Postfix(ObjectBase __instance) => UnitRegistry.Register(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), "OnDestroy")]
+    public static class Patch_ObjectBase_Unregister
+    {
+        static void Postfix(ObjectBase __instance) => UnitRegistry.Unregister(__instance);
+    }
+
+    /// <summary>Pooled weapons are reused without a fresh Awake, and the periodic
+    /// Clear()+PopulateFromScene() (active objects only) drops parked pool
+    /// instances - a relaunched weapon would otherwise be missing from the
+    /// registry and never enter the host state stream. Every launch funnels
+    /// through CommonLaunchSettings, so re-register here (Register is idempotent).</summary>
+    [HarmonyPatch(typeof(WeaponBase), nameof(WeaponBase.CommonLaunchSettings))]
+    public static class Patch_WeaponBase_RegisterOnLaunch
+    {
+        static void Postfix(WeaponBase __instance) => UnitRegistry.Register(__instance);
+    }
+
+    // ── Client physics: targeted null-guard patches ────────────────────────
+    //
+    // After save-file load, SpeedCommand.Value is null (only set when
+    // setTelegraph() is called) and Formation can be null. These targeted
+    // guards let physics run normally once the values are initialised.
+    // NO blanket host-only suppressions - the client runs full local physics.
+
+    [HarmonyPatch(typeof(Compartments), "CalculateWantedVelocityInKnots")]
+    public static class Patch_Compartments_CalculateWantedVelocityInKnots
+    {
+        private static readonly HashSet<int> _loggedIds = new();
+        internal static void ClearLogCache() => _loggedIds.Clear();
+
+        static bool Prefix(Compartments __instance, ref float __result)
+        {
+            if (__instance._baseObject?.SpeedCommand?.Value == null)
+            {
+                int id = __instance._baseObject?.UniqueID ?? -1;
+                if (_loggedIds.Add(id))
+                    Plugin.Log.LogWarning($"[Physics] SpeedCommand.Value is NULL for entity {id} — returning speed=0 (this blocks movement)");
+                __result = 0f;
+                return false;
+            }
+            return true;
+        }
+    }
+
+    [HarmonyPatch(typeof(Vessel), "applyRudderThrust")]
+    public static class Patch_Vessel_ApplyRudderThrust
+    {
+        private static readonly HashSet<int> _loggedIds = new();
+        internal static void ClearLogCache() => _loggedIds.Clear();
+
+        static bool Prefix(Vessel __instance)
+        {
+            if (__instance.SpeedCommand?.Value == null)
+            {
+                if (_loggedIds.Add(__instance.UniqueID))
+                    Plugin.Log.LogWarning($"[Physics] applyRudderThrust blocked for entity {__instance.UniqueID} — SpeedCommand.Value is NULL");
+                return false;
+            }
+            return true;
+        }
+    }
+
+    // Guard MovingInFormation.setRudderBasedOnCourse - Formation is null after save load
+    [HarmonyPatch(typeof(MovingInFormation), "setRudderBasedOnCourse")]
+    public static class Patch_MovingInFormation_SetRudderBasedOnCourse
+    {
+        private static readonly FieldInfo _vesselField =
+            AccessTools.Field(typeof(MovingInFormation), "_vessel");
+
+        static bool Prefix(MovingInFormation __instance)
+        {
+            var vessel = _vesselField?.GetValue(__instance) as Vessel;
+            return vessel?.Formation != null;
+        }
+    }
+
+    // Guard VesselPropulsionSystem.OnUpdate - SpeedCommand null after save load
+    [HarmonyPatch(typeof(VesselPropulsionSystem), "OnUpdate")]
+    public static class Patch_VesselPropulsionSystem_OnUpdate
+    {
+        private static readonly HashSet<int> _loggedIds = new();
+        internal static void ClearLogCache() => _loggedIds.Clear();
+        private static readonly FieldInfo _vesselField =
+            AccessTools.Field(typeof(VesselPropulsionSystem), "_vessel");
+
+        static bool Prefix(VesselPropulsionSystem __instance)
+        {
+            var vessel = _vesselField?.GetValue(__instance) as Vessel;
+            if (vessel?.SpeedCommand?.Value == null)
+            {
+                int id = vessel?.UniqueID ?? -1;
+                if (_loggedIds.Add(id))
+                    Plugin.Log.LogWarning($"[Physics] VesselPropulsionSystem.OnUpdate blocked for entity {id} — SpeedCommand.Value is NULL");
+                return false;
+            }
+            return true;
+        }
+    }
+
+    // ── Scene-loading guards ──────────────────────────────────────────────
+    //
+    // During client scene load, suppress systems that crash on partially
+    // initialised state. Cleared once SceneLoading = false.
+
+    [HarmonyPatch(typeof(TaskforceManager), nameof(TaskforceManager.OnUpdate))]
+    public static class Patch_TaskforceManager_OnUpdate
+    {
+        static bool Prefix() => !SessionManager.SceneLoading;
+    }
+
+    [HarmonyPatch(typeof(SensorSystemsLink), nameof(SensorSystemsLink.OnUpdate))]
+    public static class Patch_SensorSystemsLink_OnUpdate
+    {
+        static Exception? Finalizer(Exception __exception)
+        {
+            if (SessionManager.SceneLoading && __exception is NullReferenceException)
+                return null;
+            return __exception;
+        }
+    }
+
+    [HarmonyPatch(typeof(SensorSystemVisual), nameof(SensorSystemVisual.runVisualScan))]
+    public static class Patch_SensorSystemVisual_RunVisualScan
+    {
+        static Exception? Finalizer(Exception __exception)
+        {
+            if (SessionManager.SceneLoading && __exception is NullReferenceException)
+                return null;
+            return __exception;
+        }
+    }
+
+    // Guard EnvironmentAudioManager.OnStart - _mixer (AudioMixer) is null during save-file load.
+    // This runs inside GameInitializer.init(), and if it throws, it kills the ENTIRE init chain
+    // (TaskforceManager, MissionManager, AIController etc. never initialize).
+    [HarmonyPatch(typeof(EnvironmentAudioManager), nameof(EnvironmentAudioManager.OnStart))]
+    public static class Patch_EnvironmentAudioManager_OnStart
+    {
+        static Exception? Finalizer(Exception __exception)
+        {
+            if (__exception != null)
+                Plugin.Log.LogWarning($"[Patch] EnvironmentAudioManager.OnStart failed: {__exception.GetType().Name} — suppressed to keep init chain alive");
+            return null;
+        }
+    }
+
+    // Guard CIWS weapon constructor - effect prefab can be null during save-file load
+    [HarmonyPatch(typeof(WeaponSystemCIWS),
+        MethodType.Constructor,
+        new[] { typeof(ObjectBase), typeof(WeaponParameters), typeof(UnityEngine.GameObject), typeof(ObjectBaseParameters) })]
+    public static class Patch_WeaponSystemCIWS_Ctor
+    {
+        static Exception? Finalizer(Exception __exception)
+        {
+            if (SessionManager.SceneLoading && __exception is NullReferenceException)
+            {
+                Plugin.Log.LogWarning("[Patch] WeaponSystemCIWS NRE suppressed during scene load");
+                return null;
+            }
+            return __exception;
+        }
+    }
+
+
+    // ── Bidirectional order sync ────────────────────────────────────────────
+    //
+    // All order patches follow the same pattern:
+    //  - If applying from network (OrderHandler guard), just execute locally
+    //  - Client: send to host + apply locally (UI updates immediately)
+    //  - Host: apply locally + broadcast to clients via Postfix
+    //
+    // The OrderHandler.ApplyingFromNetwork flag prevents infinite loops.
+
+    [HarmonyPatch(typeof(Vessel), nameof(Vessel.setTelegraph))]
+    public static class Patch_Vessel_SetTelegraph
+    {
+        static PlayerOrderMessage Msg(Vessel v, int telegraph) => new PlayerOrderMessage
+        {
+            SourceEntityId = v.UniqueID,
+            Order          = OrderType.SetSpeed,
+            Speed          = telegraph,
+        };
+
+        static bool Prefix(Vessel __instance, int telegraph) =>
+            OrderSyncHelper.Prefix(__instance, Msg(__instance, telegraph));
+
+        static void Postfix(Vessel __instance, int telegraph) =>
+            OrderSyncHelper.Postfix(__instance, Msg(__instance, telegraph));
+    }
+
+    /// <summary>Submarine has its OWN setTelegraph override (it is NOT a Vessel) -
+    /// without this patch client sub speed orders were never forwarded, and the
+    /// 10 Hz state stream stomped the local change within a tick. Host side: the
+    /// sub's internal logic (snorkel/cavitation/evasion) calls setTelegraph on its
+    /// own - once the remote player has commanded a telegraph, local callers may
+    /// not change it.</summary>
+    [HarmonyPatch(typeof(Submarine), nameof(Submarine.setTelegraph))]
+    public static class Patch_Submarine_SetTelegraph
+    {
+        // Host: last telegraph the remote player commanded, per sub
+        private static readonly Dictionary<int, int> _remoteCommanded = new();
+        internal static void Reset() => _remoteCommanded.Clear();
+
+        static PlayerOrderMessage Msg(Submarine s, int telegraph) => new PlayerOrderMessage
+        {
+            SourceEntityId = s.UniqueID,
+            Order          = OrderType.SetSpeed,
+            Speed          = telegraph,
+        };
+
+        static bool Prefix(Submarine __instance, int telegraph, out bool __state)
+        {
+            __state = true; // executed (Postfix may broadcast)
+
+            if (OrderHandler.ApplyingFromNetwork)
+            {
+                if (Suppression.HostSuppressesRemoteTfAi(__instance))
+                    _remoteCommanded[__instance.UniqueID] = telegraph;
+                return true;
+            }
+
+            // Host: the remote player owns the telegraph - the sub's own AI/state
+            // logic may re-assert it but never change it.
+            if (Suppression.HostSuppressesRemoteTfAi(__instance)
+                && _remoteCommanded.TryGetValue(__instance.UniqueID, out int cmd)
+                && telegraph != cmd)
+            {
+                __state = false;
+                return false;
+            }
+
+            bool run = OrderSyncHelper.Prefix(__instance, Msg(__instance, telegraph));
+            __state = run;
+            return run;
+        }
+
+        static void Postfix(Submarine __instance, int telegraph, bool __state)
+        {
+            if (!__state) return;
+            OrderSyncHelper.Postfix(__instance, Msg(__instance, telegraph));
+        }
+    }
+
+    /// <summary>Host PvP: setPresetDepth writes DesiredAltitude DIRECTLY before
+    /// calling setDepth, so AI preset-depth calls bypass the setDepth owner-guard.
+    /// Block local preset changes on the remote player's subs outright - their
+    /// depth orders arrive as raw SetDepth and don't go through presets.</summary>
+    [HarmonyPatch(typeof(Submarine), nameof(Submarine.setPresetDepth))]
+    public static class Patch_Submarine_SetPresetDepth_RemoteTf
+    {
+        static bool Prefix(Submarine __instance, ref int __result)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (!Suppression.HostSuppressesRemoteTfAi(__instance)) return true;
+            __result = __instance._currentPresetDepth;
+            return false;
+        }
+    }
+
+    // NOTE: Patch_Vessel_SetRudderAngle removed.
+    // setRudderAngle() takes a PHYSICAL rudder angle (-25..+25), but the receiver
+    // interpreted it as a target heading (0-360). This caused ships to turn North
+    // after session sync (Drift state calls setRudderAngle with small values →
+    // misinterpreted as heading near 0°). Heading is synced indirectly through
+    // waypoints + StateApplier position/heading corrections.
+    // Also: SetRudderToHeading() writes _setRudderAngle directly, bypassing
+    // setRudderAngle(), so the patch never caught normal autopilot steering anyway.
+
+
+    // ── Waypoint intercept (bidirectional) ──────────────────────────────────
+
+    [HarmonyPatch(typeof(ObjectBase), "setWaypointTask",
+        new[] { typeof(GeoPosition), typeof(string), typeof(WaypointData.WaypointHeightState) })]
+    public static class Patch_ObjectBase_SetWaypointTask
+    {
+        static PlayerOrderMessage Msg(ObjectBase u, GeoPosition geoPos)
+        {
+            return new PlayerOrderMessage
+            {
+                SourceEntityId = u.UniqueID,
+                Order          = OrderType.MoveTo,
+                DestX          = (float)geoPos._longitude,
+                DestY          = (float)geoPos._height,
+                DestZ          = (float)geoPos._latitude,
+            };
+        }
+
+        static bool Prefix(ObjectBase __instance, GeoPosition geoPos) =>
+            OrderSyncHelper.Prefix(__instance, Msg(__instance, geoPos));
+
+        static void Postfix(ObjectBase __instance, GeoPosition geoPos) =>
+            OrderSyncHelper.Postfix(__instance, Msg(__instance, geoPos));
+    }
+
+
+    // ── Waypoint delete / clear sync (bidirectional) ──────────────────────
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.RemoveWaypoints))]
+    public static class Patch_ObjectBase_RemoveWaypoints
+    {
+        static PlayerOrderMessage Msg(ObjectBase u) => new PlayerOrderMessage
+        {
+            SourceEntityId = u.UniqueID,
+            Order = OrderType.RemoveWaypoints,
+        };
+
+        static bool Prefix(ObjectBase __instance) =>
+            OrderSyncHelper.Prefix(__instance, Msg(__instance));
+
+        static void Postfix(ObjectBase __instance) =>
+            OrderSyncHelper.Postfix(__instance, Msg(__instance));
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DeleteSelectedWaypoint))]
+    public static class Patch_ObjectBase_DeleteSelectedWaypoint
+    {
+        [ThreadStatic] static int _pendingIndex;
+
+        static PlayerOrderMessage Msg(ObjectBase u) => new PlayerOrderMessage
+        {
+            SourceEntityId = u.UniqueID,
+            Order = OrderType.DeleteWaypoint,
+            Speed = _pendingIndex,
+        };
+
+        static bool Prefix(ObjectBase __instance)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (SessionManager.SceneLoading) return true;
+
+            // Find index of selected waypoint before it's deleted
+            _pendingIndex = -1;
+            var root = __instance._userRoot;
+            if (root != null)
+            {
+                for (int i = 0; i < root.TaskViewModels.Count; i++)
+                {
+                    if (root.TaskViewModels[i].Task == root.SelectedTask)
+                    {
+                        _pendingIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            if (_pendingIndex < 0) return true; // nothing to sync
+            return OrderSyncHelper.Prefix(__instance, Msg(__instance));
+        }
+
+        static void Postfix(ObjectBase __instance)
+        {
+            if (_pendingIndex < 0) return;
+            OrderSyncHelper.Postfix(__instance, Msg(__instance));
+            _pendingIndex = -1;
+        }
+    }
+
+    // ── Waypoint drag sync (instant via UpdateSimulation patch) ─────────
+
+    [HarmonyPatch(typeof(UserRootNode), "UpdateSimulation", new[] { typeof(int) })]
+    public static class Patch_UserRootNode_UpdateSimulation
+    {
+        private static readonly FieldInfo TargetField =
+            AccessTools.Field(typeof(UserRootNode), "_target");
+        private static readonly Dictionary<int, float> _lastSendTime = new();
+        internal static readonly Dictionary<int, (ObjectBase unit, int index)> _pending = new();
+
+        static void Postfix(UserRootNode __instance, int start)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            var unit = TargetField.GetValue(__instance) as ObjectBase;
+            if (unit == null || unit.UniqueID == 0) return;
+
+            bool isHost = Plugin.Instance.CfgIsHost.Value;
+            if (!isHost && !TaskforceAssignmentManager.ClientMayControl(unit)) return;
+            if (!Plugin.Instance.CfgPvP.Value && UnitLockManager.IsLockedByRemote(unit.UniqueID)) return;
+
+            var root = unit._userRoot;
+            if (root == null || start < 0 || start >= root.TaskViewModels.Count) return;
+            if (!(root.TaskViewModels[start].Task is GoToWaypointTask wp)) return;
+
+            // 20Hz throttle per unit - mark pending if too soon
+            int uid = unit.UniqueID;
+            if (_lastSendTime.TryGetValue(uid, out float last) && Time.time - last < 0.05f)
+            {
+                _pending[uid] = (unit, start);
+                return;
+            }
+
+            SendEditWaypoint(unit, start, wp);
+            _lastSendTime[uid] = Time.time;
+            _pending.Remove(uid);
+        }
+
+        internal static void SendEditWaypoint(ObjectBase unit, int index, GoToWaypointTask wp)
+        {
+            var geo = wp._waypointGeoPos.value;
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = unit.UniqueID,
+                Order = OrderType.EditWaypoint,
+                Speed = index,
+                DestX = (float)geo._longitude, DestY = (float)geo._height, DestZ = (float)geo._latitude,
+            };
+
+            if (!OrderDeduplicator.ShouldSend(msg)) return; // position unchanged
+
+            if (Plugin.Instance.CfgIsHost.Value)
+                NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.ReliableOrdered);
+            else
+                NetworkManager.Instance.SendToServer(msg, DeliveryMethod.ReliableOrdered);
+        }
+    }
+
+
+    // ── Log spam suppression ─────────────────────────────────────────────
+    //
+    // 3D WebView dumps base64-encoded data into Unity logs, drowning out
+    // useful debug output. Suppress any log line containing "[3D WebView]".
+
+    [HarmonyPatch(typeof(Debug), nameof(Debug.Log), new[] { typeof(object) })]
+    public static class Patch_Debug_Log_Suppress3DWebView
+    {
+        static bool Prefix(object message)
+        {
+            return message is not string s || !s.Contains("[3D WebView]");
+        }
+    }
+
+    [HarmonyPatch(typeof(Debug), nameof(Debug.LogWarning), new[] { typeof(object) })]
+    public static class Patch_Debug_LogWarning_Suppress3DWebView
+    {
+        static bool Prefix(object message)
+        {
+            return message is not string s || !s.Contains("[3D WebView]");
+        }
+    }
+
+    [HarmonyPatch(typeof(Debug), nameof(Debug.LogError), new[] { typeof(object) })]
+    public static class Patch_Debug_LogError_Suppress3DWebView
+    {
+        static bool Prefix(object message)
+        {
+            return message is not string s || !s.Contains("[3D WebView]");
+        }
+    }
+
+
+    // ── Flight deck: host-only pipeline, client launch intents upstream ─────
+
+    [HarmonyPatch]
+    public static class Patch_AI_HandleCarrierFunctions
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(AI), "HandleCarrierFunctions");
+
+        static bool Prefix(AI __instance)
+        {
+            if (!NetworkManager.Instance.IsConnected) return true;
+            if (SessionManager.SceneLoading) return true;
+            // v2 unified host authority: carrier flight ops run host-only,
+            // for ALL carriers in both modes.
+            return Plugin.Instance.CfgIsHost.Value;
+        }
+    }
+
+    [HarmonyPatch]
+    public static class Patch_AI_LaunchAirstrike
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(AI), "LaunchAirstrike");
+
+        static bool Prefix(AI __instance)
+        {
+            if (!NetworkManager.Instance.IsConnected) return true;
+            // v2 unified host authority: airstrike decisions are host-only.
+            return Plugin.Instance.CfgIsHost.Value;
+        }
+    }
+
+    // ── FlightDeck.createLaunchTask: block + sync ───────────────────────────
+
+    [HarmonyPatch(typeof(FlightDeck), nameof(FlightDeck.createLaunchTask))]
+    public static class Patch_FlightDeck_CreateLaunchTask
+    {
+        static bool Prefix(FlightDeck __instance, VehicleTypeOnBoard vehicle, Loadout loadout,
+            Squadron squadron, string callsign, LaunchTaskParameters ltp, bool allowLaunch)
+        {
+            // v2 unified host authority: the deck pipeline runs host-only; a client
+            // launch click becomes an upstream intent order the host executes.
+            if (NetworkManager.Instance.IsEstablished)
+            {
+                if (OrderHandler.ApplyingFromNetwork) return true;
+                if (Plugin.Instance.CfgIsHost.Value) return true;
+
+                var v2vessel = __instance._baseObject;
+                if (v2vessel == null || vehicle == null) return false;
+                int vehicleIdx  = __instance._vehiclesOnBoard.IndexOf(vehicle);
+                int loadoutIdx  = vehicle.Loadouts.IndexOf(loadout);
+                int squadronIdx = vehicle.Squadrons.IndexOf(squadron);
+                int callsignIdx = squadron != null ? squadron.Callsigns.IndexOf(callsign) : -1;
+                if (vehicleIdx < 0) return false;
+
+                NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+                {
+                    SourceEntityId = v2vessel.UniqueID,
+                    Order          = OrderType.LaunchAircraft,
+                    Speed          = vehicleIdx,
+                    Heading        = loadoutIdx,
+                    DestX          = squadronIdx,
+                    DestY          = callsignIdx,
+                    DestZ          = ltp?._launchCount ?? 1,
+                    ShotsToFire    = ltp != null ? (int)ltp._missionType : 0,
+                    TargetEntityId = allowLaunch ? 1 : 0,
+                });
+                Telemetry.Count("v2.clientLaunchUpstream");
+                Plugin.Log.LogInfo($"[FlightOps] Upstream launch intent: carrier={v2vessel.UniqueID} vehicle={vehicleIdx} count={ltp?._launchCount ?? 1}");
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    // ── FlightDeck.launchVehicle: host-only under v2 ────────────────────────
+
+    [HarmonyPatch(typeof(FlightDeck), nameof(FlightDeck.launchVehicle))]
+    public static class Patch_FlightDeck_LaunchVehicle
+    {
+        static bool Prefix(FlightDeck __instance)
+        {
+            // v2: deck launches happen on the host only; the spawned aircraft
+            // replicates to the client via the createAircraft capture.
+            if (NetworkManager.Instance.IsEstablished)
+                return Plugin.Instance.CfgIsHost.Value;
+
+            return true;
+        }
+    }
+
+
+    // ── Host-authoritative AI weapon fire ──────────────────────────────────
+
+    static class AIAutoFireState
+    {
+        // Cached reflection for AI._baseObject (private field)
+        // Internal: also used by Patch_AI_HandleCarrierFunctions and Patch_AI_LaunchAirstrike
+        internal static readonly System.Reflection.FieldInfo _aiBaseObjectField =
+            AccessTools.Field(typeof(AI), "_baseObject");
+
+        /// <summary>Shared prefix for AI auto-fire/auto-attack patches.
+        /// v2 unified host authority: the HOST runs auto-fire AI for ALL units
+        /// (both taskforces, both modes); the client never fires locally -
+        /// weapon spawns arrive as replicas via EntitySpawn.</summary>
+        internal static bool Prefix(AI instance)
+        {
+            if (!NetworkManager.Instance.IsConnected) return true;
+            return Plugin.Instance.CfgIsHost.Value;
+        }
+    }
+
+    [HarmonyPatch]
+    public static class Patch_AI_AutoFireGunsInRange
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(AI), "AutoFireGunsInRange");
+
+        static bool Prefix(AI __instance) => AIAutoFireState.Prefix(__instance);
+    }
+
+    [HarmonyPatch]
+    public static class Patch_AI_AutoAttackOpponentInRange
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(AI), "AutoAttackOpponentInRange");
+
+        static bool Prefix(AI __instance) => AIAutoFireState.Prefix(__instance);
+    }
+
+    /// <summary>
+    /// Prefix: PvP guard - track which enemy puppet units have received a network
+    /// fire order. Block HandleEngageTasks for enemy puppets that have never received
+    /// a network order, catching pre-existing engage tasks loaded from save files
+    /// that bypass AddEngageTask/InsertEngageTask Harmony patches.
+    ///
+    /// Postfix: zero out the reaction delay for auto-engage tasks on the receiving
+    /// side. The delay (Random * _maxReactiontime) causes a 0-2s lag because the
+    /// weapon system starts cold after receiving a network fire order. Since ALL
+    /// enemy auto-engage tasks come from the network, skipping the delay is safe.
+    /// </summary>
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.HandleEngageTasks))]
+    public static class Patch_ObjectBase_HandleEngageTasks
+    {
+        /// <summary>
+        /// Tracks enemy unit IDs that have received at least one network fire order.
+        /// Once a unit receives a network order, HandleEngageTasks is allowed to run
+        /// for it (the pre-existing tasks were flushed by CeaseFire in OnSceneReady,
+        /// so any remaining tasks are from legitimate network orders).
+        /// </summary>
+        private static readonly HashSet<int> _networkOrderedUnits = new();
+
+        /// <summary>Call when an enemy puppet receives a fire order from the network.</summary>
+        internal static void MarkNetworkOrdered(int unitId) => _networkOrderedUnits.Add(unitId);
+
+        /// <summary>(unit, target) pairs from network fire orders. The remote
+        /// player's explicit attack decision is authoritative: the host's crew
+        /// contact-processing gate (AI.IsProcessed) must not veto it. Contacts
+        /// are per-machine - a submerged sub only consults its OWN sonar picture,
+        /// which on the host may never hold the target the ordering player could
+        /// see; the engage task then sits queued forever and ripple-fires whenever
+        /// the gate finally flips (observed: all 20 ASMs launching when the sub
+        /// was torpedoed and its submerged/alert state changed).</summary>
+        private static readonly HashSet<long> _networkOrderedPairs = new();
+
+        private static long PairKey(int unitId, int targetId) => ((long)unitId << 32) | (uint)targetId;
+
+        internal static void MarkNetworkOrderedTarget(int unitId, int targetId)
+        {
+            if (targetId != 0) _networkOrderedPairs.Add(PairKey(unitId, targetId));
+        }
+
+        internal static bool IsNetworkOrderedPair(int unitId, int targetId)
+            => _networkOrderedPairs.Contains(PairKey(unitId, targetId));
+
+        /// <summary>Clear tracking on disconnect/scene change.</summary>
+        internal static void Reset()
+        {
+            _networkOrderedUnits.Clear();
+            _networkOrderedPairs.Clear();
+        }
+
+        static bool Prefix(ObjectBase __instance)
+        {
+            if (!NetworkManager.Instance.IsConnected) return true;
+            // v2 unified host authority: engage tasks execute on the host only.
+            // The client never runs the firing pipeline - replica weapons arrive
+            // via EntitySpawn. This also neutralizes save-file residual tasks.
+            return Plugin.Instance.CfgIsHost.Value;
+        }
+    }
+
+    /// <summary>HOST: bypass the crew contact-processing gate in HandleEngageTasks
+    /// for fire orders that came from the remote player (see MarkNetworkOrderedTarget).
+    /// Scoped to exact (unit, target) pairs so the unit's own auto-engage and
+    /// auto-defence decisions keep the vanilla crew-processing behavior.</summary>
+    [HarmonyPatch(typeof(AI), nameof(AI.IsProcessed))]
+    public static class Patch_AI_IsProcessed_NetworkOrder
+    {
+        static void Postfix(ObjectBase ____baseObject, ObjectBase targetObject, ref bool __result)
+        {
+            if (__result) return;
+            if (____baseObject == null || targetObject == null) return;
+            if (!Plugin.Instance.CfgIsHost.Value || !NetworkManager.Instance.IsEstablished) return;
+            if (Patch_ObjectBase_HandleEngageTasks.IsNetworkOrderedPair(
+                    ____baseObject.UniqueID, targetObject.UniqueID))
+                __result = true;
+        }
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.InsertEngageTask))]
+    public static class Patch_ObjectBase_InsertEngageTask
+    {
+        // v2 unified host authority: the host fires natively (every spawn
+        // replicates to the client via EntitySpawn from CommonLaunchSettings);
+        // the client never fires locally. Player fires route upstream from THIS
+        // prefix - NOT from a patch on AddEngageTask: that is a one-line method
+        // the JIT inlines into its callers, so a Harmony prefix on it never runs
+        // (verified live - fire orders died silently there).
+        //
+        // Known gap (same inlining reason): direct AddEngageTask call sites
+        // (AttackTask bearing-only attacks, DropSonobuoyTask) bypass this.
+
+        static bool Prefix(ObjectBase __instance, ref EngageTask? __result,
+                           string ammoId, ObjectBase? targetObject, Vector3 targetPosition,
+                           int shotsToFire, bool autoAttack, int priority)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (!NetworkManager.Instance.IsEstablished) return true;
+            if (SessionManager.SceneLoading) return true;
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+
+            // AI/auto insertions die here (client AI is suppressed - belt and braces).
+            if (autoAttack)
+            {
+                __result = null;
+                return false;
+            }
+
+            if (!Plugin.Instance.CfgPvP.Value
+                && UnitLockManager.IsLockedByRemote(__instance.UniqueID))
+            {
+                Plugin.Log.LogInfo($"[Fire] Engage rejected: unit {__instance.UniqueID} locked by remote");
+                __result = null;
+                return false;
+            }
+            if (!TaskforceAssignmentManager.ClientMayControl(__instance))
+            {
+                Plugin.Log.LogInfo($"[Fire] Engage rejected: unit {__instance.UniqueID} not controllable (TF assignment)");
+                __result = null;
+                return false;
+            }
+
+            SendClientFireOrder(__instance, ammoId, targetObject, targetPosition, shotsToFire);
+
+            // Let the native method run: the caller (AttackTask) dereferences the
+            // returned task. The postfix removes the local enqueue - the host owns
+            // execution; the weapon returns as a replica via EntitySpawn.
+            return true;
+        }
+
+        static void Postfix(ObjectBase __instance, EngageTask? __result)
+        {
+            if (__result == null) return;
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (!NetworkManager.Instance.IsEstablished) return;
+            if (SessionManager.SceneLoading) return;
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            __instance._currentEngageTasks.Remove(__result);
+        }
+
+        /// <summary>Client → host fire order (pure upstream - the replica weapon
+        /// returns via EntitySpawn ~RTT later, masked by launch sequencing).</summary>
+        private static void SendClientFireOrder(ObjectBase unit, string? ammoId,
+            ObjectBase? targetObject, Vector3 targetPosition, int shotsToFire)
+        {
+            bool isSonobuoy = ammoId != null
+                && ammoId.IndexOf("ssq", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = unit.UniqueID,
+                Order          = isSonobuoy ? OrderType.DropSonobuoy : OrderType.FireWeapon,
+                AmmoId         = ammoId ?? "",
+                ShotsToFire    = shotsToFire,
+                TargetEntityId = targetObject != null ? targetObject.UniqueID : 0,
+            };
+
+            // Position payload: the host resolves the target by id and only falls
+            // back to the position if it dies mid-flight - send the target's
+            // current position for that case, or the raw aim point for bearing fire.
+            Vector3 aim = targetObject != null ? targetObject.transform.position : targetPosition;
+
+            // Mode-faithful coordinate encoding (matches the host's decode):
+            // PvP = GeoPosition (floating-origin safe), co-op = shared local coords.
+            float x, y, z;
+            if (Plugin.Instance.CfgPvP.Value)
+            {
+                var geo = Utils.worldPositionFromUnityToLongLat(aim, Globals._currentCenterTile);
+                x = (float)geo._longitude; y = (float)geo._height; z = (float)geo._latitude;
+            }
+            else
+            {
+                x = aim.x; y = aim.y; z = aim.z;
+            }
+
+            if (isSonobuoy)
+            {
+                msg.DestX = x; msg.DestY = y; msg.DestZ = z;
+            }
+            else
+            {
+                msg.TargetX = x; msg.TargetY = y; msg.TargetZ = z;
+            }
+
+            NetworkManager.Instance.SendToServer(msg);
+            Telemetry.Count("v2.clientFireUpstream");
+            Plugin.Log.LogInfo($"[Fire] Upstream {msg.Order}: unit={unit.UniqueID} ammo={ammoId} " +
+                $"target={msg.TargetEntityId} shots={msg.ShotsToFire}");
+        }
+    }
+
+    // ── Phase 3: Additional command replication ─────────────────────────────
+
+    [HarmonyPatch(typeof(Submarine), nameof(Submarine.setDepth))]
+    public static class Patch_Submarine_SetDepth
+    {
+        // The game internally calls setDepth() every update for depth-keeping.
+        // Without guards, the Harmony patch broadcasts every one of these calls,
+        // flooding the network with stale depth values that override player commands.
+        //
+        // Fix: after a player/network depth command, lock to that depth briefly.
+        // Internal calls that try to revert to the old depth during the lock are
+        // suppressed. Calls arriving after the grace period are treated as new
+        // player commands.
+        private static readonly Dictionary<int, float> _lockedDepth = new();
+        private static readonly Dictionary<int, float> _lockTime = new();
+        private const float GracePeriod = 1f; // seconds to suppress internal reverts
+
+        static PlayerOrderMessage Msg(Submarine s, float depth) => new PlayerOrderMessage
+        {
+            SourceEntityId = s.UniqueID,
+            Order          = OrderType.SetDepth,
+            Speed          = depth,
+        };
+
+        /// <summary>Clear locks on disconnect / scene load.</summary>
+        internal static void Reset()
+        {
+            _lockedDepth.Clear();
+            _lockTime.Clear();
+        }
+
+        static bool Prefix(Submarine __instance, float depth, out bool __state)
+        {
+            __state = false; // Postfix broadcast flag
+
+            // Network-applied order: always allow, set lock
+            if (OrderHandler.ApplyingFromNetwork)
+            {
+                _lockedDepth[__instance.UniqueID] = depth;
+                _lockTime[__instance.UniqueID] = Time.unscaledTime;
+                return true;
+            }
+
+            if (SessionManager.SceneLoading) return true;
+            if (!NetworkManager.Instance.IsConnected) return true;
+
+            // Co-op: block UI depth changes on units locked by remote player
+            if (!Plugin.Instance.CfgPvP.Value && UnitLockManager.IsLockedByRemote(__instance.UniqueID))
+                return false;
+
+            // Host: the remote player owns the depth - the sub's own AI/state logic
+            // may maintain the commanded depth, but never change it. (Without this,
+            // the AI re-commanded its old depth as soon as the 1 s grace expired -
+            // client depth orders held for "a split second" and reverted.)
+            if (Suppression.HostSuppressesRemoteTfAi(__instance)
+                && _lockedDepth.TryGetValue(__instance.UniqueID, out float remoteDepth))
+            {
+                return Mathf.Abs(depth - remoteDepth) < 1f;
+            }
+
+            int id = __instance.UniqueID;
+            float now = Time.unscaledTime;
+
+            // Check if we have an active lock
+            if (_lockTime.TryGetValue(id, out float setAt) && _lockedDepth.TryGetValue(id, out float locked))
+            {
+                bool sameDepth = Mathf.Abs(depth - locked) < 1f;
+                bool inGrace = (now - setAt) < GracePeriod;
+
+                if (sameDepth)
+                    return true; // Maintenance of current depth - execute locally, don't send
+
+                if (inGrace)
+                    return false; // Internal call trying to revert during grace - suppress entirely
+            }
+
+            // Genuine depth change (player command or AI after grace period)
+            _lockedDepth[id] = depth;
+            _lockTime[id] = now;
+            __state = true; // Signal Postfix to broadcast
+
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+
+            if (!TaskforceAssignmentManager.ClientMayControl(__instance)) return false;
+            NetworkManager.Instance.SendToServer(Msg(__instance, depth));
+            return true;
+        }
+
+        static void Postfix(Submarine __instance, float depth, bool __state)
+        {
+            if (!__state) return; // Prefix didn't flag this as a genuine change
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (SessionManager.SceneLoading) return;
+            NetworkManager.Instance.BroadcastToClients(Msg(__instance, depth));
+        }
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.CeaseFire))]
+    public static class Patch_ObjectBase_CeaseFire
+    {
+        static PlayerOrderMessage Msg(ObjectBase u) => new PlayerOrderMessage
+        {
+            SourceEntityId = u.UniqueID,
+            Order          = OrderType.CeaseFire,
+        };
+
+        static bool Prefix(ObjectBase __instance, bool report)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (SessionManager.SceneLoading) return true;
+            if (!report) return true;
+
+            return OrderSyncHelper.Prefix(__instance, Msg(__instance));
+        }
+
+        static void Postfix(ObjectBase __instance, bool report)
+        {
+            if (!report) return;
+            OrderSyncHelper.Postfix(__instance, Msg(__instance));
+        }
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.SetWeaponStatus))]
+    public static class Patch_ObjectBase_SetWeaponStatus
+    {
+        static PlayerOrderMessage Msg(ObjectBase u, ObjectBase.WeaponStatus status) => new PlayerOrderMessage
+        {
+            SourceEntityId = u.UniqueID,
+            Order          = OrderType.SetWeaponStatus,
+            Speed          = (float)(int)status,
+        };
+
+        static bool Prefix(ObjectBase __instance, ObjectBase.WeaponStatus status) =>
+            OrderSyncHelper.Prefix(__instance, Msg(__instance, status));
+
+        static void Postfix(ObjectBase __instance, ObjectBase.WeaponStatus status) =>
+            OrderSyncHelper.Postfix(__instance, Msg(__instance, status));
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.setEMCON))]
+    public static class Patch_ObjectBase_SetEMCON
+    {
+        static PlayerOrderMessage Msg(ObjectBase u, bool emcon) => new PlayerOrderMessage
+        {
+            SourceEntityId = u.UniqueID,
+            Order          = OrderType.SetEMCON,
+            Speed          = emcon ? 1f : 0f,
+        };
+
+        static bool Prefix(ObjectBase __instance, bool emcon) =>
+            OrderSyncHelper.Prefix(__instance, Msg(__instance, emcon));
+
+        static void Postfix(ObjectBase __instance, bool emcon) =>
+            OrderSyncHelper.Postfix(__instance, Msg(__instance, emcon));
+    }
+
+
+    // ── Order sync helper ──────────────────────────────────────────────────
+    //
+    // Shared helper reduces boilerplate across all order sync patches.
+    // Each patch defines a Msg() factory and delegates to OrderSyncHelper
+    // for the Prefix/Postfix guard logic and network dispatch.
+
+    static class OrderSyncHelper
+    {
+        /// <summary>Set during mast toggles to prevent SensorSystem patches from double-sending.</summary>
+        internal static bool SuppressSensorPatch;
+
+        internal static bool Prefix(ObjectBase unit, PlayerOrderMessage msg)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (SessionManager.SceneLoading) return true; // don't send during scene load
+            // Co-op: block UI orders for units the remote player has selected (ally lock).
+            // ApplyingFromNetwork above ensures network-applied orders still execute.
+            if (!Plugin.Instance.CfgPvP.Value && NetworkManager.Instance.IsConnected
+                && UnitLockManager.IsLockedByRemote(unit.UniqueID))
+                return false;
+            // PvP: don't sync orders for weapons (missiles/torpedoes) - their internal
+            // waypoint/guidance operations use local IDs meaningless to the remote side
+            if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return true;
+            // Fix #54 (enhanced Fix #49): Skip order routing for chaff/countermeasure entities.
+            // Primary check: ammunition type (covers initialized entities).
+            // Fallback check: class name (covers entities where _ap is null during spawn).
+            if (unit is WeaponBase wb)
+            {
+                if (wb._ap != null &&
+                    (wb._ap._type == Ammunition.Type.Chaff || wb._ap._type == Ammunition.Type.Noisemaker))
+                    return true;
+
+                // Fallback: check by class name when _ap is not yet initialized
+                string typeName = unit.GetType().Name;
+                if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
+                    return true;
+            }
+            if (Plugin.Instance.CfgIsHost.Value) return true;
+            if (!TaskforceAssignmentManager.ClientMayControl(unit)) return false;
+            if (!OrderDeduplicator.ShouldSend(msg)) return true; // duplicate - skip send, still execute locally
+            NetworkManager.Instance.SendToServer(msg);
+            return true;
+        }
+
+        internal static void Postfix(ObjectBase unit, PlayerOrderMessage msg)
+        {
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (OrderHandler.ApplyingFromNetwork) return;
+            // PvP: don't sync orders for weapons (missiles/torpedoes)
+            if (Plugin.Instance.CfgPvP.Value && unit is WeaponBase) return;
+            // Fix #54 (enhanced Fix #49): Same chaff/noisemaker filter as Prefix
+            if (unit is WeaponBase wb2)
+            {
+                if (wb2._ap != null &&
+                    (wb2._ap._type == Ammunition.Type.Chaff || wb2._ap._type == Ammunition.Type.Noisemaker))
+                    return;
+
+                string typeName = unit.GetType().Name;
+                if (typeName.Contains("Chaff") || typeName.Contains("Noisemaker"))
+                    return;
+            }
+            if (SessionManager.SceneLoading) return; // don't broadcast during scene load
+            if (!OrderDeduplicator.ShouldSend(msg)) return; // duplicate - skip broadcast
+            NetworkManager.Instance.BroadcastToClients(msg);
+        }
+
+        internal static PlayerOrderMessage SensorMsg(ObjectBase u, int group, bool enable) =>
+            new PlayerOrderMessage
+            {
+                SourceEntityId = u.UniqueID,
+                Order          = OrderType.SensorToggle,
+                Speed          = enable ? 1f : 0f,
+                Heading        = group,
+            };
+
+        internal static PlayerOrderMessage MastMsg(ObjectBase u, int mastId) =>
+            new PlayerOrderMessage
+            {
+                SourceEntityId = u.UniqueID,
+                Order          = OrderType.SubmarineMast,
+                Heading        = mastId,
+            };
+
+        /// <summary>
+        /// Returns the sensor group for a SensorSystem, or -1 if not a synced type.
+        /// 0 = air search radar, 1 = surface search radar.
+        /// Sonar active/passive is handled separately via the IsActive subscription.
+        /// </summary>
+        internal static int GetRadarGroup(SensorSystem sensor, ObjectBase unit)
+        {
+            if (!(sensor is SensorSystemRadar radar)) return -1;
+            var obp = unit._obp;
+            if (obp == null) return -1;
+            if (obp._airSearchRadars.Contains(radar)) return 0;
+            if (obp._surfaceSearchRadars.Contains(radar)) return 1;
+            return -1; // FCR, targeting radar - not player-toggled
+        }
+    }
+
+    // ── Order deduplication ─────────────────────────────────────────────────
+    //
+    // The game engine calls patched methods (setTelegraph, UpdateSimulation, etc.)
+    // every frame as part of normal autopilot/simulation. Without dedup, identical
+    // orders flood the network at tick rate. This cache tracks last-sent values
+    // per (entity, orderType, subKey) and suppresses sends when nothing changed.
+
+    static class OrderDeduplicator
+    {
+        private struct Fingerprint
+        {
+            public float V1, V2, V3;
+
+            public bool Matches(Fingerprint other, float eps = 0.001f) =>
+                Math.Abs(V1 - other.V1) < eps && Math.Abs(V2 - other.V2) < eps &&
+                Math.Abs(V3 - other.V3) < eps;
+        }
+
+        private static readonly Dictionary<(int, OrderType, int), Fingerprint> _cache = new();
+        private static readonly Dictionary<(int, OrderType, int), float> _lastSendTime = new();
+
+        private static float GetMinInterval(OrderType order) => order switch
+        {
+            OrderType.SensorToggle    => 10f,
+            OrderType.RemoveWaypoints => 2f,
+            OrderType.DeleteWaypoint  => 1f,
+            OrderType.SetSpeed        => 0.5f,
+            OrderType.SetEMCON        => 10f,
+            _                         => 0f,
+        };
+
+        /// <summary>
+        /// Returns true if the order differs from the last-sent value (should send).
+        /// Returns false if it's a duplicate (suppress). One-shot orders always return true.
+        /// </summary>
+        internal static bool ShouldSend(PlayerOrderMessage msg)
+        {
+            switch (msg.Order)
+            {
+                case OrderType.FireWeapon:
+                case OrderType.CeaseFire:
+                case OrderType.DropSonobuoy:
+                case OrderType.SubmarineMast:
+                case OrderType.SetAltitude:
+                case OrderType.ReturnToBase:
+                case OrderType.ClassifyContact:
+                    return true;
+            }
+
+            var key = MakeKey(msg);
+            var fp  = MakeFingerprint(msg);
+
+            if (_cache.TryGetValue(key, out var last) && last.Matches(fp))
+                return false;
+
+            float minInterval = GetMinInterval(msg.Order);
+            if (minInterval > 0f && _lastSendTime.TryGetValue(key, out var lastTime) &&
+                Time.unscaledTime - lastTime < minInterval)
+                return false;
+
+            _cache[key] = fp;
+            _lastSendTime[key] = Time.unscaledTime;
+            return true;
+        }
+
+        /// <summary>Update cache without checking (for network-received orders).</summary>
+        internal static void UpdateCache(PlayerOrderMessage msg)
+        {
+            var key = MakeKey(msg);
+            _cache[key] = MakeFingerprint(msg);
+            _lastSendTime[key] = Time.unscaledTime;
+        }
+
+        internal static void Clear()
+        {
+            _cache.Clear();
+            _lastSendTime.Clear();
+        }
+
+        private static (int, OrderType, int) MakeKey(PlayerOrderMessage msg)
+        {
+            int subKey = msg.Order switch
+            {
+                OrderType.EditWaypoint => (int)msg.Speed,   // waypoint index
+                OrderType.SensorToggle => (int)msg.Heading, // sensor group
+                _ => 0,
+            };
+            return (msg.SourceEntityId, msg.Order, subKey);
+        }
+
+        private static Fingerprint MakeFingerprint(PlayerOrderMessage msg) => msg.Order switch
+        {
+            OrderType.EditWaypoint => new Fingerprint { V1 = msg.DestX, V2 = msg.DestZ, V3 = msg.DestY },
+            OrderType.MoveTo       => new Fingerprint { V1 = msg.DestX, V2 = msg.DestZ, V3 = msg.DestY },
+            OrderType.SensorToggle => new Fingerprint { V1 = msg.Speed },
+            _                      => new Fingerprint { V1 = msg.Speed, V2 = msg.Heading },
+        };
+    }
+
+
+    // ── PvP: Block AI group-level sensor management on enemy puppets ─────────
+    //
+    // In PvP the game AI independently manages all units' sensors via
+    // DisableAllActiveSensors, OnUpdate→DisableAirSearchRadars, etc.
+    // Block these high-level group methods on enemy puppets so only the remote
+    // player's network orders can change their sensor state.
+    //
+    // We patch at the group-level (Enable/DisableAirSearchRadars, etc.) rather than
+    // SensorSystem.Enable/Disable because the SensorSystem level also fires during
+    // initialization (LoadSensorSystemRadar, SetAdditionalParameters) and from
+    // combat damage callbacks - both of which must be allowed through.
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DisableAllActiveSensors))]
+    public static class Patch_DisableAllActiveSensors
+    {
+        /// <summary>Shared guard: allow sensor changes only for own-side units (or network-applied).</summary>
+        internal static bool AllowSensorChange(ObjectBase unit)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (!NetworkManager.Instance.IsConnected) return true;
+            // Co-op: block sensor changes on units locked by remote player (ally)
+            if (!Plugin.Instance.CfgPvP.Value)
+                return !UnitLockManager.IsLockedByRemote(unit.UniqueID);
+            // PvP: only own-side units can change sensors
+            return unit._taskforce == Globals._playerTaskforce;
+        }
+
+        static bool Prefix(ObjectBase __instance) => AllowSensorChange(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DisableAirSearchRadars))]
+    public static class Patch_DisableAirSearchRadars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.DisableSurfaceSearchRadars))]
+    public static class Patch_DisableSurfaceSearchRadars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.EnableAirSearchRadars))]
+    public static class Patch_EnableAirSearchRadars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.EnableSurfaceSearchRadars))]
+    public static class Patch_EnableSurfaceSearchRadars
+    {
+        static bool Prefix(ObjectBase __instance) => Patch_DisableAllActiveSensors.AllowSensorChange(__instance);
+    }
+
+    // ── Radar Enable/Disable (catches both context menu and per-sensor UI) ──
+    //
+    // The player toggles radars via either:
+    //  - Formation context menu → EnableAirSearchRadars() → SensorSystem.Enable()
+    //  - Per-sensor UI button → ToggleEnableCommand → SensorSystem.Enable()
+    // Patching at the SensorSystem level catches both paths.
+
+    [HarmonyPatch(typeof(SensorSystem), nameof(SensorSystem.Enable))]
+    public static class Patch_SensorSystem_Enable
+    {
+        static bool Prefix(SensorSystem __instance)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (OrderSyncHelper.SuppressSensorPatch) return true;
+
+            var unit = __instance._baseObject;
+            if (unit == null) return true;
+
+            int group = OrderSyncHelper.GetRadarGroup(__instance, unit);
+            if (group < 0) return true;
+
+            return OrderSyncHelper.Prefix(unit, OrderSyncHelper.SensorMsg(unit, group, true));
+        }
+
+        static void Postfix(SensorSystem __instance)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (OrderSyncHelper.SuppressSensorPatch) return;
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            var unit = __instance._baseObject;
+            if (unit == null) return;
+
+            int group = OrderSyncHelper.GetRadarGroup(__instance, unit);
+            if (group < 0) return;
+
+            OrderSyncHelper.Postfix(unit, OrderSyncHelper.SensorMsg(unit, group, true));
+        }
+    }
+
+    [HarmonyPatch(typeof(SensorSystem), nameof(SensorSystem.Disable))]
+    public static class Patch_SensorSystem_Disable
+    {
+        static bool Prefix(SensorSystem __instance)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+            if (OrderSyncHelper.SuppressSensorPatch) return true;
+
+            var unit = __instance._baseObject;
+            if (unit == null) return true;
+
+            int group = OrderSyncHelper.GetRadarGroup(__instance, unit);
+            if (group < 0) return true;
+
+            return OrderSyncHelper.Prefix(unit, OrderSyncHelper.SensorMsg(unit, group, false));
+        }
+
+        static void Postfix(SensorSystem __instance)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (OrderSyncHelper.SuppressSensorPatch) return;
+            if (!Plugin.Instance.CfgIsHost.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            var unit = __instance._baseObject;
+            if (unit == null) return;
+
+            int group = OrderSyncHelper.GetRadarGroup(__instance, unit);
+            if (group < 0) return;
+
+            OrderSyncHelper.Postfix(unit, OrderSyncHelper.SensorMsg(unit, group, false));
+        }
+    }
+
+    // ── Active sonar (group 2) - subscription-based ────────────────────────
+    //
+    // The player toggles active sonar via SensorSystemSonar.ToggleActiveCommand
+    // which directly sets _sonar.IsActive.Value, bypassing EnableActiveSonars().
+    // We subscribe to IsActive changes after init() to catch ALL paths.
+
+    [HarmonyPatch(typeof(SensorSystemSonar), nameof(SensorSystemSonar.init))]
+    public static class Patch_SensorSystemSonar_Init
+    {
+        static void Postfix(SensorSystemSonar __instance)
+        {
+            var sonar = __instance._sonar;
+            var unit  = __instance._baseObject;
+            if (sonar == null || unit == null) return;
+
+            sonar.IsActive.Subscribe(active =>
+            {
+                if (OrderHandler.ApplyingFromNetwork) return;
+                if (unit.UniqueID == 0) return;
+                if (SessionManager.SceneLoading) return;
+
+                var msg = OrderSyncHelper.SensorMsg(unit, 2, active);
+
+                if (Plugin.Instance.CfgIsHost.Value)
+                {
+                    if (NetworkManager.Instance != null && NetworkManager.Instance.IsConnected &&
+                        OrderDeduplicator.ShouldSend(msg))
+                        NetworkManager.Instance.BroadcastToClients(msg);
+                }
+                else
+                {
+                    if (TaskforceAssignmentManager.ClientMayControl(unit) &&
+                        NetworkManager.Instance != null &&
+                        OrderDeduplicator.ShouldSend(msg))
+                        NetworkManager.Instance.SendToServer(msg);
+                }
+            });
+        }
+    }
+
+    // ── Submarine mast toggles ──────────────────────────────────────────────
+    //
+    // Mast toggles internally call SensorSystem.Enable/Disable.
+    // SuppressSensorPatch prevents the SensorSystem patches from
+    // double-sending - the mast patch handles the sync.
+
+    [HarmonyPatch(typeof(Submarine), nameof(Submarine.toggleSnorkelMast))]
+    public static class Patch_ToggleSnorkelMast
+    {
+        static bool Prefix(Submarine __instance)
+        {
+            OrderSyncHelper.SuppressSensorPatch = true;
+            return OrderSyncHelper.Prefix(__instance, OrderSyncHelper.MastMsg(__instance, 0));
+        }
+        static void Postfix(Submarine __instance)
+        {
+            OrderSyncHelper.Postfix(__instance, OrderSyncHelper.MastMsg(__instance, 0));
+            OrderSyncHelper.SuppressSensorPatch = false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Submarine), nameof(Submarine.togglePeriscopeMast))]
+    public static class Patch_TogglePeriscopeMast
+    {
+        static bool Prefix(Submarine __instance)
+        {
+            OrderSyncHelper.SuppressSensorPatch = true;
+            return OrderSyncHelper.Prefix(__instance, OrderSyncHelper.MastMsg(__instance, 1));
+        }
+        static void Postfix(Submarine __instance)
+        {
+            OrderSyncHelper.Postfix(__instance, OrderSyncHelper.MastMsg(__instance, 1));
+            OrderSyncHelper.SuppressSensorPatch = false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Submarine), nameof(Submarine.toggleRadarMast))]
+    public static class Patch_ToggleRadarMast
+    {
+        static bool Prefix(Submarine __instance)
+        {
+            OrderSyncHelper.SuppressSensorPatch = true;
+            return OrderSyncHelper.Prefix(__instance, OrderSyncHelper.MastMsg(__instance, 2));
+        }
+        static void Postfix(Submarine __instance)
+        {
+            OrderSyncHelper.Postfix(__instance, OrderSyncHelper.MastMsg(__instance, 2));
+            OrderSyncHelper.SuppressSensorPatch = false;
+        }
+    }
+
+    [HarmonyPatch(typeof(Submarine), nameof(Submarine.toggleESMMast))]
+    public static class Patch_ToggleESMMast
+    {
+        static bool Prefix(Submarine __instance)
+        {
+            OrderSyncHelper.SuppressSensorPatch = true;
+            return OrderSyncHelper.Prefix(__instance, OrderSyncHelper.MastMsg(__instance, 3));
+        }
+        static void Postfix(Submarine __instance)
+        {
+            OrderSyncHelper.Postfix(__instance, OrderSyncHelper.MastMsg(__instance, 3));
+            OrderSyncHelper.SuppressSensorPatch = false;
+        }
+    }
+
+
+    // ── Damage decal replication ────────────────────────────────────────────
+    //
+    // Combat (and so decal creation) runs host-only; capture decals parented
+    // to a unit (ship/sub) on the host and send to the client for recreation.
+
+    [HarmonyPatch]
+    public static class Patch_DecalsManager_CreateDecalFromClass
+    {
+        static MethodBase TargetMethod() =>
+            AccessTools.Method(typeof(DecalsManager), "createDecalFromClass",
+                new[] { typeof(string), typeof(Vector3), typeof(Vector3),
+                        typeof(float), typeof(Transform), typeof(bool) });
+
+        static void Postfix(string decalClass, Vector3 position, Vector3 normal,
+                            float scale, Transform parent)
+        {
+            if (!CaptureState.HostCaptureActive) return;
+            if (parent == null) return;
+
+            var unit = parent.GetComponent<ObjectBase>();
+            if (unit == null) return;
+
+            var localPos  = parent.InverseTransformPoint(position);
+            var localNorm = parent.InverseTransformDirection(normal);
+
+            var msg = new DamageDecalMessage
+            {
+                TargetEntityId = unit.UniqueID,
+                LocalX  = localPos.x,  LocalY  = localPos.y,  LocalZ  = localPos.z,
+                NormalX = localNorm.x, NormalY = localNorm.y, NormalZ = localNorm.z,
+                DecalClass = decalClass,
+                Scale = scale,
+            };
+            NetworkManager.Instance.BroadcastToClients(msg, DeliveryMethod.ReliableOrdered);
+            Telemetry.Count("v2.capturedDecal");
+        }
+    }
+
+    // ── Manual chaff deployment (Shift+C → ObjectBase.LaunchChaff) ──────────
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.LaunchChaff))]
+    public static class Patch_ObjectBase_LaunchChaff
+    {
+        static bool Prefix(ObjectBase __instance)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return true;
+
+            // v2: chaff is host-authoritative - the host launches natively and the
+            // resulting clouds replicate as decoy spawns; client clicks go upstream.
+            if (NetworkManager.Instance.IsEstablished)
+            {
+                if (Plugin.Instance.CfgIsHost.Value) return true;
+                NetworkManager.Instance.SendToServer(new PlayerOrderMessage
+                {
+                    SourceEntityId = __instance.UniqueID,
+                    Order          = OrderType.LaunchChaff,
+                });
+                Telemetry.Count("v2.clientChaffUpstream");
+                return false;
+            }
+
+            return true;
+        }
+    }
+
+    // ── PvP: fix map colors and formation markers ────────────────────────
+    //
+    // After side swap, the ECS DetectedSide component still references the
+    // pre-swap taskforce entities. Vehicle.UpdateFromECS() reads UnitTaskforce
+    // from DetectedSide, causing inverted map colors (player ships = red,
+    // enemy ships = blue) and enemy formation markers appearing.
+    //
+    // Fix: override UnitTaskforce with the object's actual _taskforce.
+    //
+    // IMPORTANT: We must NOT simply set UnitTaskforce.Value in the Postfix -
+    // that causes UnitTaskforce to oscillate every frame between the wrong ECS
+    // value and our correction. Each change fires the Taskforce subscription
+    // that queues "track identified as hostile" voice callouts, producing
+    // endless repeated callout spam.
+    //
+    // Instead: Prefix pre-sets the backing field to the wrong (ECS) value
+    // that UpdateFromECS will write, making its assignment a no-op (same
+    // value → no subscription fire). Postfix then silently corrects via
+    // backing field reflection (also no subscription fire). Net result:
+    // subscription fires at most once per contact (initial classification).
+
+    [HarmonyPatch(typeof(Vehicle), "UpdateFromECS")]
+    public static class Patch_Vehicle_UpdateAllData_PvP
+    {
+        // Cache: what UpdateFromECS sets UnitTaskforce to (the wrong ECS value)
+        private static readonly Dictionary<Vehicle, Taskforce> _ecsTaskforce = new();
+
+        // ReactiveProperty<Taskforce> backing field - set directly to bypass subscriptions
+        private static readonly FieldInfo RpValueField =
+            AccessTools.Field(typeof(ReactiveProperty<Taskforce>), "value");
+
+        internal static void ClearCache() => _ecsTaskforce.Clear();
+
+        static void Prefix(Vehicle __instance)
+        {
+            if (!Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (RpValueField == null) return;
+
+            // Pre-set backing field to what UpdateFromECS will write.
+            // This makes the base method's UnitTaskforce.Value = wrongTF
+            // a no-op (wrongTF == wrongTF → ReactiveProperty skips subscription).
+            if (_ecsTaskforce.TryGetValue(__instance, out var cachedWrongTf))
+                RpValueField.SetValue(__instance.UnitTaskforce, cachedWrongTf);
+        }
+
+        static void Postfix(Vehicle __instance)
+        {
+            if (!Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (__instance.Object == null || __instance.Object._taskforce == null) return;
+            if (RpValueField == null) return;
+
+            var actualTf = __instance.Object._taskforce;
+
+            // First detection: UpdateFromECS fired the subscription with the wrong
+            // taskforce and we have no cached value to suppress it. Correct via
+            // Value setter so the UI gets a second notification with the RIGHT value.
+            if (!_ecsTaskforce.ContainsKey(__instance))
+            {
+                _ecsTaskforce[__instance] = __instance.UnitTaskforce.Value;
+                __instance.UnitTaskforce.Value = actualTf;
+                return;
+            }
+
+            // Subsequent frames: cache and silently correct via backing field
+            // (Prefix already suppressed the subscription, no UI spam)
+            _ecsTaskforce[__instance] = __instance.UnitTaskforce.Value;
+            RpValueField.SetValue(__instance.UnitTaskforce, actualTf);
+        }
+    }
+
+    // ── PvP: hide enemy formation markers on tactical map ──────────────────
+    //
+    // After side swap, enemy units can end up in the Formations collection
+    // (due to stale ECS DetectedSide taskforce references). Even with the
+    // UpdateFromECS correction, the delegate-based ObservableComputations
+    // filter doesn't re-evaluate. Instead of fighting the filter, directly
+    // hide enemy MapFormationViewModels by overriding their display properties.
+    //
+    // UnitFormation._taskforce identifies which side owns the formation.
+
+    internal static class FormationHelper
+    {
+        internal static bool IsEnemyFormation(UnitFormation formation)
+        {
+            if (!Plugin.Instance.CfgPvP.Value) return false;
+            if (!NetworkManager.Instance.IsConnected) return false;
+            return formation?._taskforce != null
+                && formation._taskforce != Globals._playerTaskforce
+                && formation._taskforce != Globals._neutralTaskforce;
+        }
+    }
+
+    [HarmonyPatch(typeof(MapFormationViewModel), nameof(MapFormationViewModel.FormationInfoLine1), MethodType.Getter)]
+    public static class Patch_MapFormationViewModel_InfoLine_PvP
+    {
+        static void Postfix(MapFormationViewModel __instance, ref string __result)
+        {
+            if (FormationHelper.IsEnemyFormation(__instance.Formation))
+                __result = "";
+        }
+    }
+
+    [HarmonyPatch(typeof(MapFormationViewModel), nameof(MapFormationViewModel.IsValid), MethodType.Getter)]
+    public static class Patch_MapFormationViewModel_IsValid_PvP
+    {
+        static void Postfix(MapFormationViewModel __instance, ref bool __result)
+        {
+            if (FormationHelper.IsEnemyFormation(__instance.Formation))
+                __result = false;
+        }
+    }
+
+    [HarmonyPatch(typeof(MapFormationViewModel), nameof(MapFormationViewModel.Longitude), MethodType.Getter)]
+    public static class Patch_MapFormationViewModel_Longitude_PvP
+    {
+        static void Postfix(MapFormationViewModel __instance, ref double __result)
+        {
+            if (FormationHelper.IsEnemyFormation(__instance.Formation))
+                __result = double.NaN;
+        }
+    }
+
+    [HarmonyPatch(typeof(MapFormationViewModel), nameof(MapFormationViewModel.Latitude), MethodType.Getter)]
+    public static class Patch_MapFormationViewModel_Latitude_PvP
+    {
+        static void Postfix(MapFormationViewModel __instance, ref double __result)
+        {
+            if (FormationHelper.IsEnemyFormation(__instance.Formation))
+                __result = double.NaN;
+        }
+    }
+
+    // UnitMembershipViewModel constructor patch removed:
+    // Clearing ConnectionToFormation caused ArgumentOutOfRangeException in
+    // PositionChanged() (called every frame via position subscription).
+    // The formation is already hidden via IsValid=false and Lat/Lng=NaN,
+    // so connection lines don't render even without clearing the collection.
+
+    // ── Unit Selection Broadcast (Co-op) ─────────────────────────────────────
+
+    [HarmonyPatch(typeof(RenderPosition), nameof(RenderPosition.switchToObject))]
+    public static class Patch_RenderPosition_SwitchToObject
+    {
+        static void Postfix(ObjectBase objectToAttach)
+        {
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (objectToAttach == null) return;
+
+            // Verify the selection actually took effect
+            var current = Singleton<RenderPosition>.Instance.SelectedObject;
+            if (current == null || current.UniqueID != objectToAttach.UniqueID) return;
+
+            int newId = objectToAttach.UniqueID;
+            int previousClaim = UnitLockManager.LocalControlledUnitId;
+
+            // If the remote player already controls this unit, we're only spectating -
+            // don't broadcast a claim (would cause both sides to see each other as remote-locked).
+            if (UnitLockManager.IsLockedByRemote(newId))
+            {
+                // Release any prior claim so the remote knows we've let go.
+                if (previousClaim != 0 && previousClaim != newId)
+                {
+                    NetworkManager.Instance.SendToOther(new GameEventMessage
+                    {
+                        EventType = GameEventType.UnitDeselected,
+                        SourceEntityId = FourPlayerLobby.LocalPlayerId,
+                        Param     = (float)previousClaim,
+                    });
+                    UnitLockManager.ClearLocalControlled();
+                }
+                return;
+            }
+
+            // Claim control of the new unit. UnitSelected overwrites the remote's
+            // tracked ID, so we don't need a separate deselect for any prior claim.
+            if (previousClaim == newId) return; // already claimed, skip redundant broadcast
+            NetworkManager.Instance.SendToOther(new GameEventMessage
+            {
+                EventType = GameEventType.UnitSelected,
+                SourceEntityId = FourPlayerLobby.LocalPlayerId,
+                Param     = (float)newId,
+            });
+            UnitLockManager.SetLocalControlled(newId);
+        }
+    }
+
+    [HarmonyPatch(typeof(RenderPosition), nameof(RenderPosition.deselectObjectAndDetachCamera))]
+    public static class Patch_RenderPosition_DeselectObjectAndDetachCamera
+    {
+        static void Prefix()
+        {
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+
+            // Only release a claim we actually made. If we were spectating a
+            // remote-controlled unit, _localControlledUnitId is 0 and we stay silent.
+            int claimed = UnitLockManager.LocalControlledUnitId;
+            if (claimed == 0) return;
+
+            NetworkManager.Instance.SendToOther(new GameEventMessage
+            {
+                EventType = GameEventType.UnitDeselected,
+                SourceEntityId = FourPlayerLobby.LocalPlayerId,
+                Param     = (float)claimed,
+            });
+            UnitLockManager.ClearLocalControlled();
+        }
+    }
+
+    // ── IsControllable override (Co-op) ──────────────────────────────────────
+
+    /// <summary>
+    /// In co-op, forces <see cref="ObjectBase.IsControllable"/> to false for any unit
+    /// the remote player currently has selected. This delegates to the game's built-in
+    /// ally handling: the local player can still select and spectate the unit, but the
+    /// game's own code will reject order entry and render it as uncontrollable.
+    /// </summary>
+    [HarmonyPatch(typeof(ObjectBase), "get_IsControllable")]
+    public static class Patch_ObjectBase_IsControllable
+    {
+        static void Postfix(ObjectBase __instance, ref bool __result)
+        {
+            if (TaskforceAssignmentManager.LocalMayNavigateNeutral(__instance))
+            {
+                __result = true;
+                return;
+            }
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            if (__instance == null) return;
+            // Host is authoritative: it must execute client-originated orders to
+            // completion, and engage tasks are processed asynchronously outside the
+            // ApplyingFromNetwork scope. Forcing IsControllable=false on the host
+            // would make the game's own fire logic drop queued fires mid-tick.
+            // Only apply the override on the client side.
+            if (Plugin.Instance.CfgIsHost.Value) return;
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (UnitLockManager.IsLockedByRemote(__instance.UniqueID))
+                __result = false;
+        }
+    }
+
+    /// <summary>
+    /// The third player's neutral role may open navigation controls for neutral
+    /// ships. Combat remains host-rejected by HostPeerMayControl.
+    /// </summary>
+    [HarmonyPatch(typeof(ObjectBase), "get_AcceptsOrdersFromPlayer")]
+    public static class Patch_ObjectBase_AcceptsOrdersFromPlayer_Neutral
+    {
+        static void Postfix(ObjectBase __instance, ref bool __result)
+        {
+            if (TaskforceAssignmentManager.LocalMayNavigateNeutral(__instance))
+                __result = true;
+        }
+    }
+
+    // ── MapUnitViewModel lock indicator ──────────────────────────────────────
+    //
+    // When the remote player selects a unit, we tag its map label with "[ALLY]"
+    // so the local player can see at a glance which contact their partner is
+    // driving. The registry tracks live VMs so UnitLockManager can fire a
+    // PropertyChanged and make Noesis re-read ContactInfoLine2.
+
+    [HarmonyPatch(typeof(MapUnitViewModel), MethodType.Constructor,
+        new[] { typeof(Taskforce), typeof(Vehicle), typeof(ReactiveProperty<ISelectableObject>), typeof(bool) })]
+    public static class Patch_MapUnitViewModel_Ctor
+    {
+        static void Postfix(MapUnitViewModel __instance) =>
+            MapUnitViewModelRegistry.Register(__instance);
+    }
+
+    [HarmonyPatch(typeof(MapUnitViewModel), nameof(MapUnitViewModel.Dispose))]
+    public static class Patch_MapUnitViewModel_Dispose
+    {
+        static void Prefix(MapUnitViewModel __instance) =>
+            MapUnitViewModelRegistry.Unregister(__instance);
+    }
+
+    [HarmonyPatch(typeof(MapUnitViewModel), "get_ContactInfoLine2")]
+    public static class Patch_MapUnitViewModel_ContactInfoLine2
+    {
+        static void Postfix(MapUnitViewModel __instance, ref string __result)
+        {
+            if (Plugin.Instance.CfgPvP.Value) return;
+            if (!NetworkManager.Instance.IsConnected) return;
+            var obj = __instance.Unit?.BaseObject as ObjectBase;
+            if (obj != null && UnitLockManager.IsLockedByRemote(obj.UniqueID))
+                __result = "[ALLY]";
+        }
+    }
+
+    [HarmonyPatch(typeof(Aircraft), nameof(Aircraft.setPresetHeight))]
+    public static class Patch_Aircraft_SetPresetHeight
+    {
+        static void Postfix(Aircraft __instance, int preset, bool updateAltForWaypoints)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order          = OrderType.SetAltitude,
+                Speed          = (float)preset,
+                Heading        = updateAltForWaypoints ? 1f : 0f,
+            };
+
+            OrderSyncHelper.Postfix(__instance, msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(Helicopter), nameof(Helicopter.setPresetHeight))]
+    public static class Patch_Helicopter_SetPresetHeight
+    {
+        static void Postfix(Helicopter __instance, int preset, bool updateAltForWaypoints)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order          = OrderType.SetAltitude,
+                Speed          = (float)preset,
+                Heading        = updateAltForWaypoints ? 1f : 0f,
+            };
+
+            OrderSyncHelper.Postfix(__instance, msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(ObjectBase), nameof(ObjectBase.setOrder),
+        new[] { typeof(Order.Type), typeof(ObjectBase), typeof(bool) })]
+    public static class Patch_ObjectBase_SetOrder_RTB
+    {
+        static void Postfix(ObjectBase __instance, Order.Type type, ObjectBase targetObject, bool displayOrderText)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+            if (type != Order.Type.ReturnToBase) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = __instance.UniqueID,
+                Order          = OrderType.ReturnToBase,
+                TargetEntityId = targetObject?.UniqueID ?? 0,
+            };
+
+            OrderSyncHelper.Postfix(__instance, msg);
+        }
+    }
+
+    [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.OverrideRelationship))]
+    public static class Patch_Vehicle_OverrideRelationship
+    {
+        static void Postfix(Vehicle __instance, RelationsState forcedState)
+        {
+            if (OrderHandler.ApplyingFromNetwork) return;
+            if (SessionManager.SceneLoading) return;
+
+            ObjectBase baseObj = __instance.BaseObject;
+            if (baseObj == null) return;
+
+            var msg = new PlayerOrderMessage
+            {
+                SourceEntityId = baseObj.UniqueID,
+                Order          = OrderType.ClassifyContact,
+                Speed          = (float)forcedState,
+            };
+
+            OrderSyncHelper.Postfix(baseObj, msg);
+        }
+    }
+
+    /// <summary>
+    /// Fix #53: Correct priority inversion in Vehicle.CurrentRelationship().
+    /// The original method checks UnitTaskforce (auto-detection) BEFORE ForcedRelationState
+    /// (manual classification), meaning manual classifications are always shadowed.
+    /// This prefix checks ForcedRelationState first, returning it if present.
+    ///
+    /// Uses reflection to access Unity.Entities types (EntityManager, Entity,
+    /// ForcedRelationState) because the mod does not reference Unity.Entities.dll.
+    /// </summary>
+    [HarmonyPatch(typeof(Vehicle), nameof(Vehicle.CurrentRelationship))]
+    public static class Patch_Vehicle_CurrentRelationship
+    {
+        // Cached reflection handles - resolved once on first call.
+        private static bool _reflectionResolved;
+        private static bool _reflectionFailed;
+        private static FieldInfo? _vehicleEntityField;       // Vehicle.Entity
+        private static PropertyInfo? _defaultWorldProp;      // World.DefaultGameObjectInjectionWorld
+        private static PropertyInfo? _entityManagerProp;     // World.EntityManager
+        private static MethodInfo? _hasComponentMethod;      // EntityManager.HasComponent<ForcedRelationState>(Entity)
+        private static MethodInfo? _getComponentDataMethod;  // EntityManager.GetComponentData<ForcedRelationState>(Entity)
+        private static FieldInfo? _forcedStateField;         // ForcedRelationState.ForcedState
+
+        private static void ResolveReflection()
+        {
+            if (_reflectionResolved) return;
+            _reflectionResolved = true;
+
+            try
+            {
+                // Vehicle.Entity field (type is Unity.Entities.Entity)
+                _vehicleEntityField = typeof(Vehicle).GetField("Entity",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                // Unity.Entities.World type
+                var worldType = Type.GetType("Unity.Entities.World, Unity.Entities");
+                if (worldType == null)
+                {
+                    // Try scanning loaded assemblies
+                    foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+                    {
+                        worldType = asm.GetType("Unity.Entities.World");
+                        if (worldType != null) break;
+                    }
+                }
+
+                // ForcedRelationState type (in Seapower-Scripts)
+                var forcedRelationType = typeof(Vehicle).Assembly.GetType("SeaPower.ForcedRelationState");
+
+                if (worldType == null || forcedRelationType == null || _vehicleEntityField == null)
+                {
+                    _reflectionFailed = true;
+                    return;
+                }
+
+                // World.DefaultGameObjectInjectionWorld (static property)
+                _defaultWorldProp = worldType.GetProperty("DefaultGameObjectInjectionWorld",
+                    BindingFlags.Public | BindingFlags.Static);
+
+                // World.EntityManager (instance property)
+                _entityManagerProp = worldType.GetProperty("EntityManager",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                if (_defaultWorldProp == null || _entityManagerProp == null)
+                {
+                    _reflectionFailed = true;
+                    return;
+                }
+
+                // EntityManager is a struct type
+                var entityManagerType = _entityManagerProp.PropertyType;
+
+                // EntityManager.HasComponent<T>(Entity) - generic method
+                var hasComponentOpen = entityManagerType.GetMethod("HasComponent",
+                    new[] { _vehicleEntityField.FieldType });
+                if (hasComponentOpen != null && hasComponentOpen.IsGenericMethodDefinition)
+                {
+                    _hasComponentMethod = hasComponentOpen.MakeGenericMethod(forcedRelationType);
+                }
+                else
+                {
+                    // Search among all HasComponent methods for the right generic overload
+                    foreach (var m in entityManagerType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                    {
+                        if (m.Name != "HasComponent" || !m.IsGenericMethodDefinition) continue;
+                        var pars = m.GetParameters();
+                        if (pars.Length == 1 && pars[0].ParameterType == _vehicleEntityField.FieldType)
+                        {
+                            _hasComponentMethod = m.MakeGenericMethod(forcedRelationType);
+                            break;
+                        }
+                    }
+                }
+
+                // EntityManager.GetComponentData<T>(Entity) - generic method
+                foreach (var m in entityManagerType.GetMethods(BindingFlags.Public | BindingFlags.Instance))
+                {
+                    if (m.Name != "GetComponentData" || !m.IsGenericMethodDefinition) continue;
+                    var pars = m.GetParameters();
+                    if (pars.Length == 1 && pars[0].ParameterType == _vehicleEntityField.FieldType)
+                    {
+                        _getComponentDataMethod = m.MakeGenericMethod(forcedRelationType);
+                        break;
+                    }
+                }
+
+                // ForcedRelationState.ForcedState field
+                _forcedStateField = forcedRelationType.GetField("ForcedState",
+                    BindingFlags.Public | BindingFlags.Instance);
+
+                if (_hasComponentMethod == null || _getComponentDataMethod == null || _forcedStateField == null)
+                {
+                    _reflectionFailed = true;
+                }
+            }
+            catch (Exception)
+            {
+                _reflectionFailed = true;
+            }
+        }
+
+        static bool Prefix(Vehicle __instance, ref RelationsState __result)
+        {
+            // Destroyed objects -> Unknown
+            if (__instance.BaseObject != null && __instance.BaseObject.IsDestroyed)
+            {
+                __result = RelationsState.Unknown;
+                return false;
+            }
+
+            ResolveReflection();
+
+            if (_reflectionFailed)
+            {
+                // Cannot check ECS - fall through to original method
+                return true;
+            }
+
+            try
+            {
+                // Get the Entity value from the Vehicle instance
+                object? entity = _vehicleEntityField!.GetValue(__instance);
+                if (entity == null) return true;
+
+                // Get World.DefaultGameObjectInjectionWorld
+                object? world = _defaultWorldProp!.GetValue(null);
+                if (world == null) return true;
+
+                // Get the EntityManager from the world
+                object? entityManager = _entityManagerProp!.GetValue(world);
+                if (entityManager == null) return true;
+
+                // PRIORITY 1 (FIXED): Check manual classification first
+                bool hasForced = (bool)(_hasComponentMethod!.Invoke(entityManager, new[] { entity }) ?? false);
+                if (hasForced)
+                {
+                    object? forcedComponent = _getComponentDataMethod!.Invoke(entityManager, new[] { entity });
+                    if (forcedComponent == null) return true;
+                    __result = (RelationsState)(_forcedStateField!.GetValue(forcedComponent) ?? RelationsState.Unknown);
+                    return false;  // Skip original - manual classification takes priority
+                }
+            }
+            catch (Exception)
+            {
+                // If reflection fails at runtime, fall through to original
+            }
+
+            // PRIORITY 2: Fall through to original method for auto-detection
+            return true;
+        }
+    }
+}

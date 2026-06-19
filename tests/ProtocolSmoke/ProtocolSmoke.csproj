@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <NuGetAudit>false</NuGetAudit>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="LiteNetLib" Version="1.3.5" />
+    <Compile Include="..\..\src\Messages\INetMessage.cs" Link="INetMessage.cs" />
+    <Compile Include="..\..\src\Messages\PlayerOrderMessage.cs" Link="PlayerOrderMessage.cs" />
+    <Compile Include="..\..\src\Messages\GameEventMessage.cs" Link="GameEventMessage.cs" />
+    <Compile Include="..\..\src\Messages\V2\HelloMessage.cs" Link="HelloMessage.cs" />
+    <Compile Include="..\..\src\Messages\V2\WelcomeMessage.cs" Link="WelcomeMessage.cs" />
+    <Compile Include="..\..\src\Messages\V2\LobbyMessages.cs" Link="LobbyMessages.cs" />
+    <Compile Include="..\..\src\Networking\FourPlayerLobby.cs" Link="FourPlayerLobby.cs" />
+    <Compile Include="..\..\src\Gameplay\NeutralOrderPolicy.cs" Link="NeutralOrderPolicy.cs" />
+    <Compile Include="..\..\src\Networking\SteamFragmenter.cs" Link="SteamFragmenter.cs" />
+    <Compile Include="..\..\src\Net2\ProtocolInfo.cs" Link="ProtocolInfo.cs" />
+    <Compile Include="..\..\src\PluginInfo.cs" Link="PluginInfo.cs" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,15 @@
+{
+  "ok": true,
+  "launcherVersion": "0.3.0",
+  "pluginVersion": "0.1.2-alpha",
+  "target": "C:\\Users\\llkoo\\Desktop\\4 player mod\\artifacts\\packaged-exe-smoke-20260618-144946",
+  "installed": {
+    "bepInExCore": "C:\\Users\\llkoo\\Desktop\\4 player mod\\artifacts\\packaged-exe-smoke-20260618-144946\\BepInEx\\core\\BepInEx.dll",
+    "storedProxy": "C:\\Users\\llkoo\\Desktop\\4 player mod\\artifacts\\packaged-exe-smoke-20260618-144946\\BepInEx\\proxy\\winhttp.dll",
+    "storedDoorstop": "C:\\Users\\llkoo\\Desktop\\4 player mod\\artifacts\\packaged-exe-smoke-20260618-144946\\BepInEx\\proxy\\doorstop_config.ini",
+    "plugin": "C:\\Users\\llkoo\\Desktop\\4 player mod\\artifacts\\packaged-exe-smoke-20260618-144946\\BepInEx\\plugins\\SeaPowerFourPlayer.dll",
+    "liteNetLib": "C:\\Users\\llkoo\\Desktop\\4 player mod\\artifacts\\packaged-exe-smoke-20260618-144946\\BepInEx\\plugins\\LiteNetLib.dll",
+    "config": "C:\\Users\\llkoo\\Desktop\\4 player mod\\artifacts\\packaged-exe-smoke-20260618-144946\\BepInEx\\config\\com.seapower.fourplayer.cfg"
+  },
+  "activeBootstrapLeftInRoot": false
+}

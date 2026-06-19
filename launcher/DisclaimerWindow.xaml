@@ -1,0 +1,96 @@
+<Window x:Class="SeapowerMultiplayer.Launcher.DisclaimerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Sea Power Four Player - Field Briefing"
+        Width="520" Height="520"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{StaticResource PrimaryBg}">
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <TextBlock Grid.Row="0"
+                   Text="FOUR-PLAYER FIELD BRIEFING"
+                   Foreground="{StaticResource TextPrimary}"
+                   FontSize="18"
+                   FontWeight="Bold"
+                   Margin="0,0,0,12"/>
+
+        <!-- Scrollable content -->
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      Margin="0,0,0,12">
+            <StackPanel>
+                <!-- Known Issues -->
+                <TextBlock Text="KNOWN ISSUES"
+                           Foreground="{StaticResource WarningOrange}"
+                           FontSize="13"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,6"/>     
+                <TextBlock Foreground="{StaticResource TextPrimary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,4"
+                           Text="&#x2022; This is an experimental four-player synchronization layer. Use the tested 20 Hz missile / 10 Hz unit profile before increasing bandwidth."/>
+                <TextBlock Foreground="{StaticResource TextPrimary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,4"
+                           Text="&#x2022; Carrier operations and reconnects still need live testing across four separate game instances."/>
+
+                <!-- Fixed Since Last Update -->
+                <TextBlock Text="FIXED SINCE LAST UPDATE"
+                           Foreground="{StaticResource SuccessGreen}"
+                           FontSize="13"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,6"/>                
+                <TextBlock Foreground="{StaticResource TextSecondary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,12"
+                           Text="The host is authoritative, clients receive separate identity bands, and the lobby supports one host plus three clients."/>
+                <TextBlock Foreground="{StaticResource TextSecondary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           Margin="8,0,0,12"
+                           Text="The launcher installs BepInEx, disables the conflicting two-player DLL, writes the four-player config, and keeps a backup of replaced plugins."/>                
+                <!-- Disclaimer -->
+                <Rectangle Height="1"
+                           Fill="{StaticResource BorderColor}"
+                           Margin="0,4,0,12"/>
+
+                <TextBlock Foreground="{StaticResource TextPrimary}"
+                           FontSize="13"
+                           TextWrapping="Wrap"
+                           FontStyle="Italic"
+                           Text="I acknowledge that this is an early access multiplayer mod for a single player game. It is not an esports-ready experience and I will not complain when bugs and errors inevitably cause an outcome to not go my way. Instead, I will provide useful feedback."/>
+            </StackPanel>
+        </ScrollViewer>
+
+        <!-- Checkbox -->
+        <CheckBox Grid.Row="2"
+                  x:Name="ChkAcknowledge"
+                  Content="I understand and acknowledge the above"
+                  Foreground="{StaticResource TextPrimary}"
+                  FontSize="13"
+                  Margin="0,0,0,12"
+                  Checked="ChkAcknowledge_Changed"
+                  Unchecked="ChkAcknowledge_Changed"/>
+
+        <!-- Buttons -->
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="BtnAccept"
+                    Content="Continue"
+                    Padding="24,10"
+                    IsEnabled="False"
+                    Click="BtnAccept_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -1,0 +1,251 @@
+using System;
+using BepInEx.Logging;
+using Steamworks;
+using UnityEngine;
+
+namespace SeapowerMultiplayer.Transport
+{
+    /// <summary>
+    /// Manages Steam lobby lifecycle: create, join, invite, leave.
+    /// Uses Callback&lt;T&gt;.Create() - callbacks fire automatically because the game's
+    /// SteamManager already pumps SteamAPI.RunCallbacks() every frame.
+    /// </summary>
+    public static class SteamLobbyManager
+    {
+        private static ManualLogSource Log => Plugin.Log;
+
+        // ── State ─────────────────────────────────────────────────────────────
+        public static CSteamID LobbyId { get; private set; }
+        public static CSteamID HostSteamId { get; private set; }
+        public static bool InLobby => LobbyId != CSteamID.Nil;
+        public static int MemberCount => InLobby ? SteamMatchmaking.GetNumLobbyMembers(LobbyId) : 0;
+
+        // Pending join from launch arg - deferred until callbacks are registered
+        private static ulong _pendingLobbyJoin;
+        private static bool _autoCreatePublicLobby;
+        private static float _autoCreateAfter;
+        private static bool _creatingPublicLobby;
+
+        // ── Callbacks ─────────────────────────────────────────────────────────
+        private static Callback<LobbyCreated_t>? _lobbyCreatedCb;
+        private static Callback<LobbyEnter_t>? _lobbyEnteredCb;
+        private static Callback<GameLobbyJoinRequested_t>? _lobbyJoinRequestedCb;
+        private static Callback<LobbyChatUpdate_t>? _lobbyChatUpdateCb;
+
+        /// <summary>
+        /// Register Steam callbacks. Call once during plugin init.
+        /// Safe to call even if transport is LiteNetLib - callbacks just won't fire.
+        /// </summary>
+        public static void Init()
+        {
+            _lobbyCreatedCb = Callback<LobbyCreated_t>.Create(OnLobbyCreated);
+            _lobbyEnteredCb = Callback<LobbyEnter_t>.Create(OnLobbyEntered);
+            _lobbyJoinRequestedCb = Callback<GameLobbyJoinRequested_t>.Create(OnLobbyJoinRequested);
+            _lobbyChatUpdateCb = Callback<LobbyChatUpdate_t>.Create(OnLobbyChatUpdate);
+
+            // If we have a pending join from launch args, do it now
+            if (_pendingLobbyJoin != 0)
+            {
+                SteamMatchmaking.JoinLobby(new CSteamID(_pendingLobbyJoin));
+                _pendingLobbyJoin = 0;
+            }
+        }
+
+        /// <summary>
+        /// Called from Plugin.Awake() when +connect_lobby arg is found.
+        /// Defers the actual join until Init() registers callbacks.
+        /// </summary>
+        public static void JoinLobbyFromLaunchArg(ulong lobbyId)
+        {
+            Log.LogInfo($"[SteamLobby] Deferred join for lobby {lobbyId}");
+            _pendingLobbyJoin = lobbyId;
+        }
+
+        public static void RequestAutoCreatePublicLobby()
+        {
+            _autoCreatePublicLobby = true;
+            _autoCreateAfter = Time.realtimeSinceStartup + 2f;
+        }
+
+        public static void Tick()
+        {
+            if (_autoCreatePublicLobby &&
+                Time.realtimeSinceStartup >= _autoCreateAfter &&
+                !InLobby)
+            {
+                _autoCreatePublicLobby = false;
+                CreatePublicLobby();
+            }
+
+            if (_creatingPublicLobby && InLobby)
+                LobbyDirectoryClient.Tick(LobbyId);
+        }
+
+        // ── Public API ────────────────────────────────────────────────────────
+
+        public static void CreateLobby()
+            => CreateLobby(isPublic: false);
+
+        public static void CreatePublicLobby()
+            => CreateLobby(isPublic: true);
+
+        private static void CreateLobby(bool isPublic)
+        {
+            if (InLobby)
+            {
+                Log.LogWarning("[SteamLobby] Already in a lobby");
+                return;
+            }
+
+            _creatingPublicLobby = isPublic;
+            Log.LogInfo($"[SteamLobby] Creating {(isPublic ? "public" : "friends-only")} lobby...");
+            SteamMatchmaking.CreateLobby(
+                isPublic ? ELobbyType.k_ELobbyTypePublic : ELobbyType.k_ELobbyTypeFriendsOnly,
+                FourPlayerLobby.MaxPlayers);
+        }
+
+        public static void InviteFriend()
+        {
+            if (!InLobby) return;
+            SteamFriends.ActivateGameOverlayInviteDialog(LobbyId);
+        }
+
+        public static void LeaveLobby()
+        {
+            if (!InLobby) return;
+
+            Log.LogInfo("[SteamLobby] Leaving lobby");
+            SteamMatchmaking.LeaveLobby(LobbyId);
+            LobbyDirectoryClient.RemovePublicLobby();
+            LobbyId = CSteamID.Nil;
+            HostSteamId = CSteamID.Nil;
+            _creatingPublicLobby = false;
+            NetworkManager.Instance.Stop();
+        }
+
+        public static void Shutdown()
+        {
+            LobbyDirectoryClient.RemovePublicLobby();
+        }
+
+        public static void JoinLobby(CSteamID lobbyId)
+        {
+            if (InLobby)
+            {
+                Log.LogWarning("[SteamLobby] Already in a lobby, leaving first");
+                LeaveLobby();
+            }
+
+            Log.LogInfo($"[SteamLobby] Joining lobby {lobbyId}...");
+            SteamMatchmaking.JoinLobby(lobbyId);
+        }
+
+        // ── Callbacks ─────────────────────────────────────────────────────────
+
+        private static void OnLobbyCreated(LobbyCreated_t result)
+        {
+            if (result.m_eResult != EResult.k_EResultOK)
+            {
+                _creatingPublicLobby = false;
+                Log.LogError($"[SteamLobby] Failed to create lobby: {result.m_eResult}");
+                return;
+            }
+
+            LobbyId = new CSteamID(result.m_ulSteamIDLobby);
+            Log.LogInfo($"[SteamLobby] Lobby created: {LobbyId}");
+
+            // Set lobby metadata
+            HostSteamId = SteamUser.GetSteamID();
+            SteamMatchmaking.SetLobbyData(LobbyId, "host_steamid", HostSteamId.ToString());
+            SteamMatchmaking.SetLobbyData(LobbyId, "mod_version", PluginInfo.PLUGIN_VERSION);
+            SteamMatchmaking.SetLobbyData(LobbyId, "pvp", Plugin.Instance.CfgPvP.Value.ToString());
+            SteamMatchmaking.SetLobbyData(LobbyId, "max_players", FourPlayerLobby.MaxPlayers.ToString());
+            SteamMatchmaking.SetLobbyData(LobbyId, "sp4p", "1");
+            SteamMatchmaking.SetLobbyData(LobbyId, "protocol", Net2.ProtocolInfo.ProtocolVersion.ToString());
+            SteamMatchmaking.SetLobbyData(
+                LobbyId,
+                "lobby_name",
+                Plugin.Instance.CfgPublicLobbyName.Value);
+
+            // Start transport as host
+            NetworkManager.Instance.StartTransport(asHost: true);
+            if (_creatingPublicLobby)
+                LobbyDirectoryClient.RegisterPublicLobby(LobbyId);
+        }
+
+        private static void OnLobbyEntered(LobbyEnter_t result)
+        {
+            var lobbyId = new CSteamID(result.m_ulSteamIDLobby);
+            var response = (EChatRoomEnterResponse)result.m_EChatRoomEnterResponse;
+
+            if (response != EChatRoomEnterResponse.k_EChatRoomEnterResponseSuccess)
+            {
+                Log.LogError($"[SteamLobby] Failed to join lobby: {response}");
+                LobbyDirectoryClient.Track(
+                    "join_failed",
+                    lobbyId.ToString(),
+                    response.ToString());
+                return;
+            }
+
+            LobbyId = lobbyId;
+            Log.LogInfo($"[SteamLobby] Joined lobby: {LobbyId}");
+
+            // If we're not the host (someone else created the lobby), connect as client
+            string hostIdStr = SteamMatchmaking.GetLobbyData(LobbyId, "host_steamid");
+            if (string.IsNullOrEmpty(hostIdStr))
+            {
+                Log.LogError("[SteamLobby] Lobby has no host_steamid data");
+                return;
+            }
+
+            var hostSteamId = new CSteamID(ulong.Parse(hostIdStr));
+            var mySteamId = SteamUser.GetSteamID();
+
+            if (hostSteamId == mySteamId)
+            {
+                // We're the host - already started transport in OnLobbyCreated
+                Log.LogInfo("[SteamLobby] We are the host, transport already running");
+                return;
+            }
+
+            // We're joining as client - store host ID for SteamTransport to read
+            Log.LogInfo($"[SteamLobby] Connecting to host {hostSteamId}");
+            HostSteamId = hostSteamId;
+            Plugin.Instance.CfgIsHost.Value = false;
+
+            // Sync PvP from lobby metadata - a mismatched local PvP setting would
+            // otherwise be refused by the v2 handshake mode check.
+            string pvpStr = SteamMatchmaking.GetLobbyData(LobbyId, "pvp");
+            if (!string.IsNullOrEmpty(pvpStr) && bool.TryParse(pvpStr, out bool lobbyPvP))
+            {
+                if (Plugin.Instance.CfgPvP.Value != lobbyPvP)
+                    Log.LogInfo($"[SteamLobby] Overriding local PvP={Plugin.Instance.CfgPvP.Value} with host's PvP={lobbyPvP}");
+                Plugin.Instance.CfgPvP.Value = lobbyPvP;
+            }
+
+            NetworkManager.Instance.StartTransport(asHost: false);
+            LobbyDirectoryClient.Track("join_succeeded", LobbyId.ToString());
+        }
+
+        private static void OnLobbyJoinRequested(GameLobbyJoinRequested_t request)
+        {
+            Log.LogInfo($"[SteamLobby] Invite accepted, joining lobby {request.m_steamIDLobby}");
+            JoinLobby(request.m_steamIDLobby);
+        }
+
+        private static void OnLobbyChatUpdate(LobbyChatUpdate_t update)
+        {
+            var who = new CSteamID(update.m_ulSteamIDUserChanged);
+            var change = (EChatMemberStateChange)update.m_rgfChatMemberStateChange;
+            string name = SteamFriends.GetFriendPersonaName(who);
+
+            if ((change & EChatMemberStateChange.k_EChatMemberStateChangeEntered) != 0)
+                Log.LogInfo($"[SteamLobby] {name} joined the lobby");
+            if ((change & EChatMemberStateChange.k_EChatMemberStateChangeLeft) != 0)
+                Log.LogInfo($"[SteamLobby] {name} left the lobby");
+            if ((change & EChatMemberStateChange.k_EChatMemberStateChangeDisconnected) != 0)
+                Log.LogInfo($"[SteamLobby] {name} disconnected from lobby");
+        }
+    }
+}
