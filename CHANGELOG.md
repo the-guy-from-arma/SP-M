@@ -8,7 +8,9 @@
 - The public lobby browser refreshes automatically while it is open and remains
   visible while a launcher-created public Steam operation starts.
 - The website's primary download now serves the complete launcher package with
-  the installer EXE included.
+  a direct one-click installer EXE, with the complete ZIP retained separately.
+- Removed the generic discovery/deployment marketing sections from the download
+  page so it stays focused on the launcher.
 - Release publishing copies the full package into the web service so the
   download button no longer depends on an unset Railway asset URL.
 

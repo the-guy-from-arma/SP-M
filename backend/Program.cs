@@ -555,16 +555,16 @@ static IResult DownloadResult(
     string localPath,
     string downloadName)
 {
-    if (Uri.TryCreate(externalUrl, UriKind.Absolute, out var uri) &&
-        (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp))
-        return Results.Redirect(uri.ToString());
-
     if (File.Exists(localPath))
         return Results.File(
             localPath,
             "application/octet-stream",
             downloadName,
             enableRangeProcessing: true);
+
+    if (Uri.TryCreate(externalUrl, UriKind.Absolute, out var uri) &&
+        (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp))
+        return Results.Redirect(uri.ToString());
 
     return Results.Problem(
         "The full launcher package has not been published with this deployment.",

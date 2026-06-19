@@ -21,8 +21,8 @@ One Railway service provides:
    - `LAUNCHER_SHA256=<the packaged EXE SHA-256>`
 
    `LAUNCHER_DOWNLOAD_URL` and `PACKAGE_DOWNLOAD_URL` are optional overrides.
-   The release build copies the complete launcher ZIP into
-   `wwwroot/downloads`, so the public download button works without them.
+   The release build copies both the installer EXE and complete ZIP into
+   `wwwroot/downloads`. The main website button serves the EXE directly.
    Release and plugin versions are compiled into the service to prevent stale
    Railway environment values from advertising an older build.
 

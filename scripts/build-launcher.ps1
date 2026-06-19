@@ -80,6 +80,9 @@ Compress-Archive -Path (Join-Path $packageDir "*") -DestinationPath $zipPath -Co
 
 $webDownloadsDir = Join-Path $root "backend\wwwroot\downloads"
 New-Item -ItemType Directory -Path $webDownloadsDir -Force | Out-Null
+Copy-Item -LiteralPath $packagedExe `
+    -Destination (Join-Path $webDownloadsDir "SeaPowerFourPlayerLauncher.exe") `
+    -Force
 Copy-Item -LiteralPath $zipPath `
     -Destination (Join-Path $webDownloadsDir "SeaPowerFourPlayer-Launcher.zip") `
     -Force
@@ -90,4 +93,5 @@ Write-Host "Friend package: $zipPath"
 Write-Host "SHA-256: $hash"
 Write-Host ""
 Write-Host "Website package copied to:"
+Write-Host (Join-Path $webDownloadsDir "SeaPowerFourPlayerLauncher.exe")
 Write-Host (Join-Path $webDownloadsDir "SeaPowerFourPlayer-Launcher.zip")
